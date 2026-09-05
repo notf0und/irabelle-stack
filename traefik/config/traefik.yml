@@ -1,0 +1,35 @@
+api:
+  insecure: true
+
+entryPoints:
+  web:
+    address: ":80"
+    observability:
+      accesslogs: false
+  websecure:
+    address: ":443"
+    observability:
+      accesslogs: false
+    transport:
+      respondingTimeouts:
+        readTimeout: 1800s
+        idleTimeout: 1800s
+        writeTimeout: 1800s
+
+providers:
+  docker:
+    exposedByDefault: false
+  file:
+    directory: /config/certificates
+    watch: true
+
+accesslog:
+  format: json
+  filepath: /config/logs/access.log
+  fields:
+    headers: 
+      defaultmode: keep
+
+log:
+  level: DEBUG
+  filepath: /config/logs/traefik.log 

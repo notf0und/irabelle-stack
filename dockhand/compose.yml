@@ -1,0 +1,31 @@
+services:
+  dockhand:
+    image: fnsys/dockhand:latest
+    container_name: dockhand
+    env_file: .env
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /etc/localtime:/etc/localtime:ro
+      - /etc/timezone:/etc/timezone:ro
+      - ./config/dockhand:/app/data
+      - ../:/app/data/stacks/irabelle
+    networks:
+      - app-bridge
+    labels:
+      traefik.enable: true
+      traefik.http.routers.dockhand.rule: Host("dockhand") || Host("dockhand.ira")
+      traefik.http.routers.dockhand.entrypoints: web
+      traefik.http.routers.dockhand.service: dockhand
+      traefik.http.routers.dockhand.middlewares: dockhand
+      traefik.http.services.dockhand.loadbalancer.server.port: 3000
+      traefik.http.middlewares.dockhand.redirectScheme.scheme: https
+
+      traefik.http.routers.dockhand-https.rule: Host("dockhand") || Host("dockhand.ira")
+      traefik.http.routers.dockhand-https.entrypoints: websecure
+      traefik.http.routers.dockhand-https.tls: true
+    restart: unless-stopped
+
+networks:
+  app-bridge:
+    driver: bridge
+    external: true
