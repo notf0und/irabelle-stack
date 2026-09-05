@@ -1,0 +1,38 @@
+services:
+  traefik:
+    image: traefik:latest
+    container_name: traefik
+    command:
+      - --configFile=/config/traefik.yml
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - 80:80
+      - 443:443
+    volumes:
+      - ./config:/config
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    labels:
+      traefik.enable: true
+      traefik.http.routers.traefik.rule: Host("traefik") || Host("traefik.ira")
+      traefik.http.routers.traefik.service: api@internal
+      traefik.http.routers.traefik.entrypoints: web
+      traefik.http.services.traefik.loadbalancer.server.port: 8080
+      traefik.http.routers.traefik.middlewares: traefik
+      traefik.http.middlewares.traefik.redirectScheme.scheme: https
+      traefik.http.routers.traefik.observability.accesslogs: false
+
+      traefik.http.routers.traefik-https.rule: Host("traefik") || Host("traefik.ira")
+      traefik.http.routers.traefik-https.entrypoints: websecure
+      traefik.http.routers.traefik-https.tls: true
+      traefik.http.routers.traefik-https.observability.accesslogs: false
+
+    networks:
+      - default
+      - app-bridge
+    restart: unless-stopped
+
+networks:
+  app-bridge:
+    driver: bridge
+    name: app-bridge
