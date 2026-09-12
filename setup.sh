@@ -234,6 +234,22 @@ PY
 done
 [ "$PRE_CREATED" -gt 0 ] || note "nothing missing — Docker has no reason to create anything"
 
+# Traefik creates config/logs itself at startup (traefik.yml sets
+# log.filepath: /config/logs/traefik.log) — inside the container, as root. That
+# path is not a mount source, so the loop above never sees it, and a root-owned
+# logs/ then blocks cert-watcher.sh: it runs as you, from cron, and writes its
+# own log there. A failing log write aborts it, which is easy to misread as
+# "the watcher is broken". Create it while the checkout is still yours.
+for d in traefik/config/logs traefik/config/certificates; do
+  if [ ! -d "$REPO_DIR/$d" ]; then
+    mkdir -p "$REPO_DIR/$d"
+    note "created $d"
+  elif [ ! -w "$REPO_DIR/$d" ]; then
+    warn "$d is not writable by $(id -un) — cert-watcher.sh cannot log or write certificates there"
+    warn "fix once with: sudo chown -R $(id -un):$(id -gn) '$REPO_DIR/$d'"
+  fi
+done
+
 # Anything already root-owned in here came from a container start before this
 # script did that, and it will block `rm -rf` of the checkout.
 if find "$REPO_DIR" -path "$REPO_DIR/.git" -prune -o -user root -print -quit 2>/dev/null | grep -q .; then
@@ -375,6 +391,19 @@ elif [ "$CRON_MODE" = "no" ]; then
 else
   install_cron
   note "update.sh only registers new stacks — it never deploys them"
+
+  # @reboot only fires at boot, so a fresh setup would otherwise leave nothing
+  # watching until the next reboot and no certificates after it. Start it now;
+  # the flock in the script makes a duplicate instance harmless.
+  watcher="$REPO_DIR/traefik/generate_certificates/cert-watcher.sh"
+  if [ -x "$watcher" ] && ! pgrep -f 'cert-watcher\.sh' >/dev/null 2>&1; then
+    if command -v setsid >/dev/null 2>&1; then
+      setsid "$watcher" >/dev/null 2>&1 &
+    else
+      nohup "$watcher" >/dev/null 2>&1 &
+    fi
+    note "started cert-watcher.sh — certificates appear as Traefik registers services"
+  fi
 fi
 
 # --- hand over ---------------------------------------------------------------

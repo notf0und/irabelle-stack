@@ -20,7 +20,9 @@ set -eu
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 STACK_DIR=$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)
 CERT_DIR="$SCRIPT_DIR/../config/certificates"
-LOG_FILE="$SCRIPT_DIR/../config/logs/cert-watcher.log"
+# Overridable so an unwritable config/logs (see below) is not a dead end:
+#   CERT_WATCHER_LOG=/tmp/cert-watcher.log ./cert-watcher.sh
+LOG_FILE=${CERT_WATCHER_LOG:-"$SCRIPT_DIR/../config/logs/cert-watcher.log"}
 API_URL="https://localhost/api/http/routers"
 LOCK_FILE="/tmp/traefik-cert-watcher.lock"
 
@@ -33,9 +35,27 @@ if [ -f "$STACK_DIR/.env" ]; then
 fi
 TLD=${TLD:-test}
 
-mkdir -p "$(dirname -- "$LOG_FILE")" "$CERT_DIR"
+mkdir -p "$(dirname -- "$LOG_FILE")" "$CERT_DIR" 2>/dev/null || true
 
-log() { printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" | tee -a "$LOG_FILE"; }
+# Logging must never be fatal. This runs as the checkout owner (from cron),
+# while Traefik — root, inside its container — creates config/logs for its own
+# log file, so appending here can hit EACCES. Under `set -e` the failing tee
+# used to abort the run *after* printing "generating certificate" and before
+# issuing anything, which looks exactly like a watcher that does nothing.
+LOG_WARNED=0
+log() {
+  _msg=$(printf '[%s] %s' "$(date '+%Y-%m-%d %H:%M:%S')" "$*")
+  printf '%s\n' "$_msg"
+  if ! printf '%s\n' "$_msg" >>"$LOG_FILE" 2>/dev/null; then
+    if [ "$LOG_WARNED" -eq 0 ]; then
+      LOG_WARNED=1
+      printf 'warning: cannot write %s — logging to stdout only\n' "$LOG_FILE" >&2
+      printf '         fix once with: sudo chown -R %s:%s %s\n' \
+        "$(id -un)" "$(id -gn)" "$(dirname -- "$LOG_FILE")" >&2
+    fi
+  fi
+  return 0
+}
 
 # Extract <service>.<TLD> hosts from the running Traefik via its API.
 # Falls back to scanning docker labels if the API is unreachable.
