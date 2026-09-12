@@ -45,6 +45,7 @@ Usage: sudo ./host-vlan.sh [options]
 
   --dry-run        show the netplan file and commands, change nothing
   --try            apply with `netplan try` (rolls back unless confirmed)
+  --network-only   create just the docker macvlan network (no root needed)
   --down           remove the VLAN file and the docker network
   --status         print current state (no root needed)
 
@@ -65,6 +66,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --dry-run) MODE=dry ;;
     --try) MODE=try ;;
+    --network-only) MODE=network ;;
     --down) MODE=down ;;
     --status) MODE=status ;;
     --nic) shift; HOST_NIC=${1:?--nic needs a value} ;;
@@ -221,6 +223,44 @@ do_down() {
   note "the LAN keeps whatever default route your other netplan files define"
 }
 
+# --- docker network ----------------------------------------------------------
+# Split out of do_apply so it can be run on its own (--network-only). It needs
+# no root, and it is the step that goes missing if the privileged half is
+# interrupted — which then looks like a mysterious "network not found" much
+# later.
+ensure_network() {
+  say "docker network ($DOCKER_MACVLAN_NETWORK on $DOCKER_VLAN_NAME)"
+
+  if ! command -v docker >/dev/null 2>&1; then
+    warn "docker not found on PATH — create it by hand with:"
+    note "docker network create -d macvlan --subnet $DOCKER_VLAN_SUBNET \\"
+    note "    --gateway $DOCKER_VLAN_GATEWAY -o parent=$DOCKER_VLAN_NAME $DOCKER_MACVLAN_NETWORK"
+    return 1
+  fi
+  if ! ip link show "$DOCKER_VLAN_NAME" >/dev/null 2>&1; then
+    warn "$DOCKER_VLAN_NAME does not exist yet — run this script without --network-only first"
+    return 1
+  fi
+
+  if docker network inspect "$DOCKER_MACVLAN_NETWORK" >/dev/null 2>&1; then
+    local parent
+    parent=$(docker network inspect "$DOCKER_MACVLAN_NETWORK" --format '{{index .Options "parent"}}')
+    if [ "$parent" = "$DOCKER_VLAN_NAME" ]; then
+      note "$DOCKER_MACVLAN_NETWORK already exists (parent $parent) — kept"
+      return 0
+    fi
+    warn "$DOCKER_MACVLAN_NETWORK exists but has parent '$parent', expected '$DOCKER_VLAN_NAME'"
+    return 1
+  fi
+
+  docker network create -d macvlan \
+    --subnet "$DOCKER_VLAN_SUBNET" \
+    --gateway "$DOCKER_VLAN_GATEWAY" \
+    -o parent="$DOCKER_VLAN_NAME" \
+    "$DOCKER_MACVLAN_NETWORK" >/dev/null
+  note "created macvlan network $DOCKER_MACVLAN_NETWORK on $DOCKER_VLAN_NAME"
+}
+
 # --- apply -------------------------------------------------------------------
 do_apply() {
   local body backup='' i
@@ -281,23 +321,7 @@ do_apply() {
     warn "$DOCKER_VLAN_NAME did not get $(vlan_iface_ip) — is the switch port a trunk carrying id $DOCKER_VLAN_ID?"
   fi
 
-  say "docker network"
-  if ! command -v docker >/dev/null 2>&1; then
-    warn "docker not on PATH — create the network later, or use --dry-run for the command"
-  elif docker network inspect "$DOCKER_MACVLAN_NETWORK" >/dev/null 2>&1; then
-    note "$DOCKER_MACVLAN_NETWORK already exists — kept"
-    local parent
-    parent=$(docker network inspect "$DOCKER_MACVLAN_NETWORK" --format '{{index .Options "parent"}}')
-    [ "$parent" = "$DOCKER_VLAN_NAME" ] \
-      || warn "$DOCKER_MACVLAN_NETWORK has parent '$parent', expected '$DOCKER_VLAN_NAME'"
-  else
-    docker network create -d macvlan \
-      --subnet "$DOCKER_VLAN_SUBNET" \
-      --gateway "$DOCKER_VLAN_GATEWAY" \
-      -o parent="$DOCKER_VLAN_NAME" \
-      "$DOCKER_MACVLAN_NETWORK" >/dev/null
-    note "created macvlan network $DOCKER_MACVLAN_NETWORK on $DOCKER_VLAN_NAME"
-  fi
+  ensure_network || warn "the VLAN is configured; finish the network with: ./$(basename "$0") --network-only"
 
   do_status
 
@@ -310,5 +334,6 @@ do_apply() {
 case "$MODE" in
   status) do_status ;;
   down) do_down ;;
+  network) ensure_network ;;
   *) do_apply ;;
 esac
