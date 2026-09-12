@@ -12,6 +12,7 @@ dashboard — that publishes services under an internal domain
 ├── setup.sh                         # bootstrap: .env copies + root CA + pick stacks
 ├── host-vlan.sh                     # host Docker VLAN + macvlan network (needs root)
 ├── update.sh                        # pull + register new stacks (cron-friendly)
+├── stacks.sh                        # start / stop / status every stack at once
 ├── NETWORK.md                       # VLAN / macvlan / bridge layout and why
 ├── traefik/
 │   ├── compose.yml                  # reads ${TLD} from .env
@@ -87,13 +88,48 @@ file behind:
 ./setup.sh --no-cron     # skip them
 ```
 
-`setup.sh` never creates directories, never issues service certificates and
-never overwrites an existing `.env`, root CA or certificate. It is safe to
-re-run. To deploy by hand instead, it is just compose:
+`setup.sh` never issues service certificates and never overwrites an existing
+`.env`, root CA or certificate. It is safe to re-run. The only directories it
+creates are the two runtime ones a container and the watcher write into —
+`traefik/config/logs` and `traefik/config/certificates` — because Docker would
+otherwise invent `logs/` as root, and a root-owned `logs/` is what made the
+certificate watcher look broken: it could not write its own log, and the
+failing write aborted it under `set -e`. To deploy by hand instead, it is just
+compose:
 
 ```sh
 docker compose -f traefik/compose.yml up -d
 ```
+
+### Starting and stopping everything
+
+`stacks.sh` acts on every stack in the checkout at once — any directory here
+with a `compose.yml`, the same rule `setup.sh` uses:
+
+```sh
+./stacks.sh              # stop everything (the default action)
+./stacks.sh start        # bring it all back
+./stacks.sh restart      # restart in place
+./stacks.sh status       # one line per stack: running/total
+./stacks.sh down         # remove the containers (volumes are kept)
+```
+
+`stop` keeps the containers, so `start` restores them exactly as they were: no
+compose file is read and no `.env` is needed. Containers are matched by
+compose's project label *and* the checkout they were created from, so it never
+touches another checkout's containers, or the host's own Docker workloads.
+
+To pick up a changed `compose.yml` or `.env`, use `down` then `start`, or force
+a recreate:
+
+```sh
+docker compose -f <stack>/compose.yml up -d --force-recreate
+```
+
+That distinction matters more than it looks: a **bind-mounted config file** —
+`traefik/config/traefik.yml`, say — is invisible to `docker compose up -d`. It
+sees no change in the service definition, leaves the container running, and the
+old configuration stays in effect. Restart or force-recreate the container.
 
 ### Deploying through Dockhand (or any git-based tool)
 

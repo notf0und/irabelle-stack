@@ -27,10 +27,15 @@ services:
       traefik.http.routers.traefik-https.entrypoints: websecure
       traefik.http.routers.traefik-https.tls: true
       traefik.http.routers.traefik-https.observability.accesslogs: false
-
     networks:
       - default
       - app-bridge
+    healthcheck:
+      test: ["CMD", "traefik", "healthcheck", "--ping"]
+      interval: 10s
+      timeout: 2s
+      retries: 3
+      start_period: 5s
     restart: unless-stopped
 
 networks:
