@@ -19,6 +19,12 @@ entryPoints:
 providers:
   docker:
     exposedByDefault: false
+    # Which network Traefik dials backends on. Without this it picks one of a
+    # container's networks itself, and for a service that also has a VLAN
+    # address (Pi-hole on app-macvlan) it picks the macvlan one — which this
+    # host cannot reach at all, giving 502 Bad Gateway. Pin it to the shared
+    # bridge, where every stack is also attached.
+    network: app-bridge
   file:
     directory: /config/certificates
     watch: true
