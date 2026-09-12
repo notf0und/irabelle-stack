@@ -161,6 +161,19 @@ for s in "${STACKS[@]}"; do
 done
 note "stacks found: ${STACKS[*]}"
 
+# Per-install config, kept out of git so a `git pull` can never be blocked by a
+# local edit — the same deal as .env above. Traefik's static config is the one
+# people actually tweak (log level, ping, entrypoints), so it ships as an
+# .example and is copied into place here.
+if [ -f traefik/config/traefik.yml.example ]; then
+  if [ -f traefik/config/traefik.yml ]; then
+    note "traefik/config/traefik.yml exists — left untouched"
+  else
+    cp traefik/config/traefik.yml.example traefik/config/traefik.yml
+    note "created traefik/config/traefik.yml from traefik.yml.example"
+  fi
+fi
+
 # --- 2. the shared network ---------------------------------------------------
 say "Docker network"
 if docker network inspect app-bridge >/dev/null 2>&1; then

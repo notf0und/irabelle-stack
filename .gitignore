@@ -27,6 +27,12 @@ host.env
 **/generate_certificates/root-certificates/
 **/generate_certificates/tmp/
 
+# Per-install config, created by ./setup.sh from the committed .example — the
+# same deal as .env. Tracked files are ones a `git pull` must be able to
+# update; anything an install or its owner edits lives here instead, so a pull
+# can never be blocked by a local edit.
+**/config/traefik.yml
+
 # Runtime logs, written by containers as root — the default ACL setup.sh puts on
 # this directory is what keeps them editable without sudo.
 **/config/logs/*

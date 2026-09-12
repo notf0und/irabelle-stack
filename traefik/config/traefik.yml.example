@@ -1,0 +1,50 @@
+api:
+  insecure: true
+
+# The container healthcheck pings this endpoint (`traefik healthcheck --ping`).
+# Without it there is no /ping handler: the request falls through to the
+# internal API entrypoint, gets a 404, and Docker reports the container
+# unhealthy even though it is serving perfectly well. `traefik` is that
+# internal entrypoint on :8080, reachable only from inside the container — so
+# this adds nothing on :80 or :443.
+ping:
+  entryPoint: traefik
+
+entryPoints:
+  web:
+    address: ":80"
+    observability:
+      accesslogs: false
+  websecure:
+    address: ":443"
+    observability:
+      accesslogs: false
+    transport:
+      respondingTimeouts:
+        readTimeout: 1800s
+        idleTimeout: 1800s
+        writeTimeout: 1800s
+
+providers:
+  docker:
+    exposedByDefault: false
+    # Which network Traefik dials backends on. Without this it picks one of a
+    # container's networks itself, and for a service that also has a VLAN
+    # address (Pi-hole on app-macvlan) it picks the macvlan one — which this
+    # host cannot reach at all, giving 502 Bad Gateway. Pin it to the shared
+    # bridge, where every stack is also attached.
+    network: app-bridge
+  file:
+    directory: /config/certificates
+    watch: true
+
+accesslog:
+  format: json
+  filepath: /config/logs/access.log
+  fields:
+    headers: 
+      defaultmode: keep
+
+log:
+  level: DEBUG
+  filepath: /config/logs/traefik.log 
