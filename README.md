@@ -11,6 +11,7 @@ dashboard — that publishes services under an internal domain
 ├── host.env.example                 # host VLAN settings for host-vlan.sh
 ├── setup.sh                         # bootstrap: .env copies + root CA + pick stacks
 ├── host-vlan.sh                     # host Docker VLAN + macvlan network (needs root)
+├── update.sh                        # pull + register new stacks (cron-friendly)
 ├── NETWORK.md                       # VLAN / macvlan / bridge layout and why
 ├── traefik/
 │   ├── compose.yml                  # reads ${TLD} from .env
@@ -51,41 +52,41 @@ cd irabelle-stack
 ./setup.sh
 ```
 
-`setup.sh` will:
+`setup.sh` bootstraps the host and then gets out of the way. It does only the
+work Dockhand cannot do for itself:
 
-1. create `.env` from `.env.example` if the repo root has none,
-2. copy that `.env` into every stack that does not have its own yet — except a
-   stack that ships its own `.env.example`, which is used instead,
-3. generate the root CA for any stack that ships
-   `generate_certificates/1-generate-root-certificates.sh`,
-4. show a menu of the stacks it found and start the ones you pick.
+1. create the `.env` files the stacks read — from `.env.example` at the root,
+   and copied into every stack (a stack shipping its own `.env.example` uses
+   that instead, so it can carry extra variables);
+2. create the shared `app-bridge` network Dockhand attaches to;
+3. generate the root CA behind the `*.$TLD` certificates;
+4. start **Dockhand** and print the URL to open.
 
-Services come up as `<service>.test`; see
-[Name resolution](#name-resolution) to make those names resolve across your LAN.
+It does **not** start any other stack. From there you deploy what you want in
+Dockhand — `traefik` first, since every other service is published through it,
+so the `https://<service>.<TLD>` names only work once it is running.
 
-The menu is tick-box style, **everything unticked by default** — space
-toggles, up/down moves, `a` selects all, `n` clears, enter confirms, `q`
-cancels:
+Because Dockhand's own `dockhand.<TLD>` name needs Traefik, its port is
+published directly (`DOCKHAND_PORT`, default 3000) — that URL is the
+chicken-and-egg escape hatch. It bypasses Traefik's TLS, so **turn on
+authentication**; `setup.sh` warns if it is still off.
 
-```
-Select the stacks to start
-  space = toggle   up/down = move   a = all   n = none   enter = confirm   q = cancel
-
-> [ ] traefik
-  [ ] dockhand
-```
-
-Non-interactive equivalents:
+It also offers to install a cron job running `update.sh`, which pulls this
+checkout and makes newly added stacks *available* in Dockhand — it never
+deploys them:
 
 ```sh
-./setup.sh --list                     # just print the stacks found
-./setup.sh --stacks traefik,dockhand  # start these, no menu
-./setup.sh --no-start                 # prepare .env files and root CA only
+./setup.sh --cron        # install without asking
+./setup.sh --no-cron     # never ask
 ```
 
 `setup.sh` never creates directories, never issues service certificates and
 never overwrites an existing `.env`, root CA or certificate. It is safe to
-re-run.
+re-run. To deploy by hand instead, it is just compose:
+
+```sh
+docker compose -f traefik/compose.yml up -d
+```
 
 ### Deploying through Dockhand (or any git-based tool)
 
@@ -111,6 +112,51 @@ would deploy and then fail on every later action
 ([#1313](https://github.com/Finsys/dockhand/issues/1313)). Upgrade, or operate
 the stack through Deploy/Sync only.
 
+#### Two ways to register a stack, and why they differ
+
+| | **From git** | **Import / `update.sh`** |
+| --- | --- | --- |
+| Files | cloned into Dockhand's own storage | stay in this checkout |
+| `.env` | not in the clone (gitignored) → values must come from the env panel | the ones `setup.sh` writes, used as-is |
+| Secrets | Dockhand's environment panel | the gitignored `.env`, as usual |
+| Auto-sync, webhooks | yes, per stack | no — redeploy after your own `git pull` |
+| Adding a stack | one Dockhand stack per subdirectory, by hand | one command (below) |
+
+Because imported stacks keep their files here, they fit this repo's design
+better: `setup.sh` creates the `.env` files, and Dockhand reads them in place.
+
+#### Making a new stack available automatically
+
+Dockhand has no directory watcher, so a stack added here does not register
+itself. `update.sh` closes that gap using the same API as Dockhand's Import
+button — it scans this checkout, subtracts what Dockhand already tracks, and
+adopts the rest:
+
+```sh
+./update.sh --dry-run      # list what would be adopted; no pull, no writes
+./update.sh                # pull, then adopt anything new
+./update.sh --no-pull      # adopt what is on disk now, without pulling
+./update.sh --deploy       # adopt, then deploy (opt-in)
+```
+
+It is meant for cron, and `setup.sh` offers to install it:
+
+```cron
+*/15 * * * * /home/carlos/irabelle-stack/update.sh >> /home/carlos/irabelle-update.log 2>&1
+```
+
+Registering a stack is inert — no containers are created, nothing is started,
+stopped or restarted. New stacks simply appear in Dockhand waiting for you to
+deploy them, which is why there is no `--deploy` in the cron line: this script
+keeps stacks *available*, you decide when they *run*.
+
+Two deliberate behaviours: it takes a lock so one run cannot overlap the next,
+and if `git pull --ff-only` fails it exits **before** registering anything — a
+half-updated checkout, or one with local edits, is not something to hand to
+Dockhand. It locates Dockhand by inspecting the container; set `DOCKHAND_URL` to
+point it elsewhere, and `DOCKHAND_TOKEN` to a bearer token once Dockhand
+authentication is enabled.
+
 ## Configuration
 
 Each stack reads its own `.env` from its own directory. The repo root has the
@@ -125,11 +171,11 @@ own directory and the shared root template stays generic. If a stack has no
 `.env.example`, it inherits the root values as before.
 
 `TLD` is shared by every stack. If a stack's `.env` disagrees with the root
-one, `setup.sh` says so instead of silently starting services under two
+one, `setup.sh` says so instead of silently deploying services under two
 different domains. To re-copy the template into one stack:
 
 ```sh
-rm traefik/.env && ./setup.sh --no-start
+cp .env traefik/.env     # a stack with its own .env.example takes that instead
 ```
 
 ### Renaming the internal domain

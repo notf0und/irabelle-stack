@@ -3,6 +3,16 @@ services:
     image: fnsys/dockhand:latest
     container_name: dockhand
     env_file: .env
+    # Published on purpose. Dockhand is how you deploy everything else — Traefik
+    # included — so its `dockhand.$TLD` name cannot work yet at bootstrap time.
+    # This port is the chicken-and-egg escape hatch: reach it directly, deploy
+    # Traefik, and the nicer HTTPS name works from then on.
+    #
+    # It also bypasses Traefik's TLS and any middleware, so make sure
+    # authentication is enabled (Settings -> Authentication). setup.sh warns if
+    # it is not.
+    ports:
+      - "${DOCKHAND_PORT:-3000}:3000"
     environment:
       # "Matching paths": Dockhand runs `docker compose` inside this container,
       # so a relative bind mount in a stack (./config/foo) resolves to an
