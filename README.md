@@ -202,6 +202,31 @@ Failing that, per-client `/etc/hosts` entries work for individual names. Note
 that clients which ignore your resolver — hardcoded DNS, Android Private DNS, or
 a browser with secure DNS/DoH enabled — will not resolve `*.test`.
 
+## Host networking
+
+Containers that need a real address on the router's Docker VLAN — Pi-hole,
+Unbound — ride a macvlan network on a VLAN interface the host creates. That is
+the one part of this setup that needs root, so it lives in its own script:
+
+```sh
+cp host.env.example host.env      # optional; every default works without it
+sudo ./host-vlan.sh --dry-run     # read the netplan it would write
+sudo ./host-vlan.sh --try         # apply, auto-rollback unless you confirm
+```
+
+It writes `/etc/netplan/60-docker-vlan.yaml` — the same filename `station` uses
+— and creates the macvlan network on top of the VLAN interface
+(`Docker.Online`, id 40, 192.168.40.0/24). `sudo ./host-vlan.sh --down` removes
+both again.
+
+`./setup.sh` deliberately does not do this. It stays unprivileged, and it now
+refuses to start a stack whose compose file wants a macvlan network that does
+not exist yet, instead of quietly creating a plain bridge in its place.
+
+**[NETWORK.md](NETWORK.md)** has the address plan, the Pi-hole + Unbound compose
+files, the per-service bridge network pattern for isolating containers from each
+other, and the router-side steps.
+
 ## Certificates
 
 `setup.sh` only creates the root CA
@@ -280,8 +305,10 @@ networks:
 
 `cert-watcher.sh` notices the new container and issues its certificate within a
 few seconds. A stack that declares `external: true` cannot create the network
-itself, so `setup.sh` creates `app-bridge` before starting anything that
-expects it.
+itself, so `setup.sh` creates a plain bridge network before starting anything
+that expects it. A **macvlan** network is different — that one needs the host
+VLAN and is created by `host-vlan.sh`, so `setup.sh` stops with an instruction
+rather than substituting a bridge.
 
 ## Repository hygiene
 
@@ -293,6 +320,7 @@ committed by accident:
 | Ignored | Why |
 | --- | --- |
 | `.env`, `.env.*` | per-client config; may grow secrets (`.env.example` is committed) |
+| `host.env` | host networking for `host-vlan.sh` (`host.env.example` is committed) |
 | `**/config/certificates/*` | leaf certificates, **private keys**, generated `tls.yml` |
 | `**/generate_certificates/root-certificates/` | the private root CA |
 | `**/config/logs/*` | access log keeps request headers (cookies, auth) |

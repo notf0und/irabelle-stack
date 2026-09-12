@@ -16,6 +16,11 @@
 .env.*
 !.env.example
 
+# Host networking read by ./host-vlan.sh. Deliberately not part of .env: that
+# file is handed to containers, and host interface names have no business in
+# there. host.env.example is the committed template.
+host.env
+
 # Generated TLS material: leaf certificates, their private keys, the serial
 # file and the tls.yml that Traefik's file provider reads.
 **/config/certificates/*

@@ -225,23 +225,51 @@ if ! command -v docker >/dev/null 2>&1; then
 fi
 
 # A stack that declares a network `external: true` cannot create it; the stack
-# that owns the network can. Create it first so any selection works.
+# that owns the network can. Create it first so any selection works — except a
+# macvlan/ipvlan network, which needs a VLAN interface on the host and is
+# created by ./host-vlan.sh (see NETWORK.md). Creating one of those as a plain
+# bridge would silently give containers the wrong connectivity.
+#
+# Ask compose for the resolved config rather than parsing the YAML ourselves: it
+# normalises name/driver/external and fills in defaults, so the answer is right
+# however the file is written or ordered.
 external_networks() {
-  awk '
-    /^[^[:space:]]/ { in_net = ($0 ~ /^networks:[[:space:]]*$/) }
-    in_net && /^[[:space:]]+[A-Za-z0-9_.-]+:[[:space:]]*$/ { name = $1; sub(/:$/, "", name) }
-    in_net && /external:[[:space:]]*true/ && name != "" { print name }
-  ' "$1"
+  docker compose -f "$1" config 2>/dev/null | awk '
+    function flush() {
+      if (in_net && ext && name != "") print name "\t" driver
+    }
+    /^networks:/ { in_net = 1; name = ""; driver = "bridge"; ext = 0; next }
+    /^[^[:space:]]/ { flush(); in_net = 0; next }
+    !in_net { next }
+    /^[[:space:]]+[A-Za-z0-9_.-]+:[[:space:]]*$/ {
+      flush(); name = $1; sub(/:$/, "", name); driver = "bridge"; ext = 0; next
+    }
+    /^[[:space:]]+name:[[:space:]]*/ { name = $2; next }
+    /^[[:space:]]+driver:[[:space:]]*/ { driver = $2; next }
+    /^[[:space:]]+external:[[:space:]]*true/ { ext = 1; next }
+    END { flush() }
+  '
 }
 
 for s in "${PICKED[@]}"; do
   say "Starting $s"
-  while IFS= read -r net; do
+  while IFS=$'\t' read -r net drv; do
     [ -n "$net" ] || continue
-    if ! docker network inspect "$net" >/dev/null 2>&1; then
-      docker network create "$net" >/dev/null
-      note "created docker network $net"
-    fi
+    docker network inspect "$net" >/dev/null 2>&1 && continue
+    case "$drv" in
+      macvlan|ipvlan)
+        printf '\n\033[31m%s\033[0m\n' \
+          "$s needs the external $drv network '$net', which does not exist yet." >&2
+        printf '    Create the host VLAN and that network first:\n' >&2
+        printf '        sudo ./host-vlan.sh\n' >&2
+        printf '    Then re-run this script. See NETWORK.md for the address plan.\n' >&2
+        exit 1
+        ;;
+      *)
+        docker network create "$net" >/dev/null
+        note "created docker network $net"
+        ;;
+    esac
   done < <(external_networks "$s/compose.yml")
   docker compose -f "$s/compose.yml" up -d
 done
