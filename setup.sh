@@ -196,6 +196,51 @@ for s in "${STACKS[@]}"; do
   note "service certificates are issued by cert-watcher.sh once Traefik runs"
 done
 
+# --- bind-mount paths --------------------------------------------------------
+# Docker creates a missing bind-mount source itself — as root, mode 0755. On a
+# directory mount that leaves a root-owned directory inside the checkout, and a
+# checkout you cannot write to is one you cannot delete: removing
+# `dockhand/config/dockhand` needs write permission on `dockhand/config`, which
+# Docker created and you do not own. So create every in-checkout mount source
+# first, as you, and Docker never has to invent one.
+say "Bind mounts"
+PRE_CREATED=0
+for s in "${STACKS[@]}"; do
+  ( cd "$s" && docker compose config --format json ) >"$TMP/$s.json" 2>/dev/null || continue
+  python3 - "$TMP/$s.json" "$REPO_DIR" >"$TMP/$s.dirs" <<'PY'
+import json, os, sys
+data = json.load(open(sys.argv[1]))
+repo = sys.argv[2]
+for svc in (data.get("services") or {}).values():
+    for vol in (svc.get("volumes") or []):
+        if vol.get("type") != "bind":
+            continue
+        src = vol.get("source") or ""
+        if src.startswith(repo + os.sep) and not os.path.exists(src):
+            print(src)
+PY
+  while IFS= read -r d; do
+    [ -n "$d" ] || continue
+    if [[ "${d##*/}" == *.* ]]; then
+      # Looks like a file. Docker would create a *directory* for it, and the
+      # container would then read an empty one — do not paper over that.
+      warn "missing file mount: ${d#"$REPO_DIR"/} — create it, or the container gets an empty directory"
+    else
+      mkdir -p "$d"
+      note "created ${d#"$REPO_DIR"/}"
+      PRE_CREATED=$((PRE_CREATED + 1))
+    fi
+  done <"$TMP/$s.dirs"
+done
+[ "$PRE_CREATED" -gt 0 ] || note "nothing missing — Docker has no reason to create anything"
+
+# Anything already root-owned in here came from a container start before this
+# script did that, and it will block `rm -rf` of the checkout.
+if find "$REPO_DIR" -path "$REPO_DIR/.git" -prune -o -user root -print -quit 2>/dev/null | grep -q .; then
+  warn "root-owned paths already exist in this checkout (from an earlier run)"
+  warn "clear them once with: sudo chown -R $(id -un) '$REPO_DIR'"
+fi
+
 # --- 4. Dockhand -------------------------------------------------------------
 say "Dockhand"
 # --force-recreate because a re-cloned checkout is a *new* directory: a running
