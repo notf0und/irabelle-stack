@@ -2,9 +2,9 @@
 # ---------------------------------------------------------------------------
 # setup.sh — bootstrap this host, then hand over to Dockhand.
 #
-#   ./setup.sh              prepare, start Dockhand, print its URL
-#   ./setup.sh --cron       also install the update cron job
-#   ./setup.sh --no-cron    never ask about the cron job
+#   ./setup.sh              prepare, start Dockhand, print its URL, and install
+#                           the two cron jobs
+#   ./setup.sh --no-cron    do not install the cron jobs
 #
 # From here on, stacks are deployed from Dockhand's UI — setup.sh starts no
 # stack but Dockhand itself. What it does first is only the work Dockhand
@@ -24,19 +24,19 @@ REPO_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 cd "$REPO_DIR"
 
 DOCKHAND_PORT=${DOCKHAND_PORT:-3000}
-CRON_MODE=ask
+CRON_MODE=yes
 
 usage() {
   cat <<'EOF'
 Usage: ./setup.sh [options]
 
-  --cron        install the update cron job without asking
-  --no-cron     never ask about the update cron job
+  --no-cron     do not install the cron jobs
+  --cron        (default) install them
   -h, --help    this text
 
 Environment:
   DOCKHAND_PORT           host port for Dockhand (default 3000)
-  UPDATE_CRON_SCHEDULE    cron schedule for update.sh (default */15 * * * *)
+  UPDATE_CRON_SCHEDULE    cron schedule for update.sh (default 0 */12 * * *)
 EOF
   exit "${1:-0}"
 }
@@ -57,11 +57,30 @@ warn() { printf '\033[33m    WARN: %s\033[0m\n' "$*" >&2; }
 die()  { printf '\033[31mERROR: %s\033[0m\n' "$*" >&2; exit 1; }
 
 command -v docker >/dev/null 2>&1 || die "docker is not installed or not on PATH"
+command -v curl >/dev/null 2>&1 || die "curl is required"
+command -v python3 >/dev/null 2>&1 || die "python3 is required"
+
+TMP=$(mktemp -d)
+trap 'rm -rf "$TMP"' EXIT
 
 # --- 1. the .env files -------------------------------------------------------
 # A stack's .env.example is a template: @REPO_DIR@ expands to this checkout's
 # absolute path, which is what the dockhand stack needs for matching paths.
 write_env_from() { sed "s|@REPO_DIR@|$REPO_DIR|g" "$1" >"$2"; }
+
+# In a .env.example, the literal value `change-me` means "generate one on first
+# setup". That way a fresh clone never runs with a published default password,
+# and re-cloning (which throws these files away) does not quietly restore it.
+generate_placeholders() {
+  local file=$1 key new
+  while IFS= read -r key; do
+    [ -n "$key" ] || continue
+    new=$(openssl rand -hex 16 2>/dev/null \
+          || head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')
+    sed -i "s|^$key=change-me$|$key=$new|" "$file"
+    note "generated $key in $file"
+  done < <(sed -n 's/^\([A-Za-z0-9_]*\)=change-me$/\1/p' "$file" 2>/dev/null || true)
+}
 
 env_tld() {
   [ -f "$1" ] || return 0
@@ -84,6 +103,7 @@ if [ -f .env ]; then
 elif [ -f .env.example ]; then
   write_env_from .env.example .env
   note "created .env from .env.example"
+  generate_placeholders .env
 else
   die "no .env and no .env.example at the repo root"
 fi
@@ -94,6 +114,7 @@ for s in "${STACKS[@]}"; do
     if [ -f "$s/.env.example" ]; then
       write_env_from "$s/.env.example" "$s/.env"
       note "$s/.env created from $s/.env.example"
+      generate_placeholders "$s/.env"
     else
       cp .env "$s/.env"
       note "$s/.env created from .env"
@@ -145,7 +166,10 @@ done
 
 # --- 4. Dockhand -------------------------------------------------------------
 say "Dockhand"
-( cd dockhand && docker compose up -d )
+# --force-recreate because a re-cloned checkout is a *new* directory: a running
+# container keeps the old mount, which now points at a deleted inode, so it
+# would never see the fresh files.
+( cd dockhand && docker compose up -d --force-recreate )
 
 printf '    waiting for the API'
 any=0
@@ -164,43 +188,116 @@ else
   warn "no answer on port $DOCKHAND_PORT after 40s — check: docker logs dockhand"
 fi
 
-# --- automatic stack availability -------------------------------------------
-say "Stack availability"
+# --- Dockhand baseline -------------------------------------------------------
+# Dockhand's own database lives in its data directory, which is not in git. A
+# fresh clone therefore starts with an empty one: no environment, no configured
+# paths. Restore just enough that ./update.sh works and the Import dialog can
+# see this checkout — so "clone, ./setup.sh" is all a new box needs, and
+# re-cloning while you iterate does not leave you with a dead UI.
+api() {
+  local method=$1 path=$2 body=${3:-}
+  if [ -n "$body" ]; then
+    curl -fsS -m 20 -X "$method" "http://127.0.0.1:$DOCKHAND_PORT$path" \
+      -H 'Content-Type: application/json' --data-binary "$body"
+  else
+    curl -fsS -m 20 -X "$method" "http://127.0.0.1:$DOCKHAND_PORT$path"
+  fi
+}
+
+if [ "$any" = 1 ]; then
+  say "Dockhand baseline"
+
+  if api GET /api/environments >"$TMP/envs.json" 2>/dev/null; then
+    ENV_COUNT=$(python3 -c 'import json,sys
+try: print(len(json.load(open(sys.argv[1]))))
+except Exception: print(0)' "$TMP/envs.json")
+    if [ "$ENV_COUNT" = 0 ]; then
+      ENV_NAME=${DOCKHAND_ENV_NAME:-local}
+      if api POST /api/environments \
+           "{\"name\":\"$ENV_NAME\",\"connectionType\":\"socket\",\"socketPath\":\"/var/run/docker.sock\"}" \
+           >/dev/null 2>&1; then
+        note "created the '$ENV_NAME' environment (local Docker socket)"
+      else
+        warn "could not create an environment — add one in Dockhand: Settings -> Environments"
+      fi
+    else
+      note "$ENV_COUNT environment(s) already configured"
+    fi
+  else
+    warn "could not read the environment list from Dockhand"
+  fi
+
+  # Make the checkout a place the Import dialog can scan without browsing.
+  if api GET /api/settings/general >"$TMP/general.json" 2>/dev/null; then
+    PATHS=$(python3 - "$TMP/general.json" "$REPO_DIR" <<'PY'
+import json, sys
+try:
+    cur = json.load(open(sys.argv[1])).get("externalStackPaths") or []
+except Exception:
+    cur = []
+if isinstance(cur, str):
+    cur = [p for p in cur.splitlines() if p]
+if sys.argv[2] in cur:
+    raise SystemExit(0)
+cur.append(sys.argv[2])
+print(json.dumps(cur))
+PY
+) || true
+    if [ -n "${PATHS:-}" ]; then
+      if api POST /api/settings/general "{\"externalStackPaths\":$PATHS}" >/dev/null 2>&1; then
+        note "added $REPO_DIR to Dockhand's external stack paths"
+      else
+        warn "could not add $REPO_DIR to the external stack paths"
+      fi
+    else
+      note "external stack paths already include this checkout"
+    fi
+  fi
+fi
+
+# --- scheduled jobs ----------------------------------------------------------
+say "Scheduled jobs"
 install_cron() {
-  local schedule=${UPDATE_CRON_SCHEDULE:-"*/15 * * * *"}
-  local line="$schedule $REPO_DIR/update.sh >> $HOME/irabelle-update.log 2>&1 # irabelle-stack"
+  local schedule=${UPDATE_CRON_SCHEDULE:-"0 */12 * * *"}
+  local watcher="$REPO_DIR/traefik/generate_certificates/cert-watcher.sh"
   local tmp
   tmp=$(mktemp)
-  crontab -l 2>/dev/null | grep -v 'irabelle-stack' >"$tmp" || true
-  printf '%s\n' "$line" >>"$tmp"
+  # Replace our own lines, keep everything else in the crontab untouched. The
+  # pattern also catches lines left by an older layout (a cert-watcher under a
+  # previous path), which would otherwise sit there failing every boot.
+  crontab -l 2>/dev/null | grep -vE 'irabelle-stack|cert-watcher\.sh' >"$tmp" || true
+
+  # No redirects on purpose: these jobs do not leave log files behind. cron
+  # discards the output, so if you want the history use `journalctl` after
+  # appending `2>&1 | logger -t irabelle-update` to a line.
+  local update_line="$schedule $REPO_DIR/update.sh # irabelle-stack"
+  printf '%s\n' "$update_line" >>"$tmp"
+
+  # The certificates live in the checkout and are gitignored, so a fresh clone
+  # has none. The watcher issues them once Traefik is up; at boot it retries
+  # until it can.
+  local watch_line=''
+  if [ -x "$watcher" ]; then
+    watch_line="@reboot $watcher # irabelle-stack"
+    printf '%s\n' "$watch_line" >>"$tmp"
+  fi
+
   crontab "$tmp"
   rm -f "$tmp"
+
   note "installed in $(id -un)'s crontab:"
-  note "  $line"
+  note "  $update_line"
+  [ -n "$watch_line" ] && note "  $watch_line"
+  return 0
 }
 
 if [ ! -d "$REPO_DIR/.git" ]; then
-  note "not a git checkout — there is nothing to pull, so no cron job"
+  note "not a git checkout — there is nothing to pull, so no update job"
 elif [ "$CRON_MODE" = "no" ]; then
   note "skipped (--no-cron)"
 else
-  if [ "$CRON_MODE" = "ask" ]; then
-    if [ -t 0 ]; then
-      printf '    Run update.sh every 15 minutes so new stacks appear in Dockhand? [y/N] '
-      read -r answer || answer=n
-      case "$answer" in
-        [yY]*) CRON_MODE=yes ;;
-        *) CRON_MODE=no ;;
-      esac
-    else
-      CRON_MODE=no
-      note "no terminal to ask on — skipping (use --cron to install it)"
-    fi
-  fi
-  if [ "$CRON_MODE" = "yes" ]; then
-    install_cron
-    note "update.sh pulls this checkout and registers new stacks; it never deploys"
-  fi
+  install_cron
+  note "update.sh only registers new stacks — it never deploys them"
 fi
 
 # --- hand over ---------------------------------------------------------------

@@ -9,9 +9,9 @@
 #   ./update.sh --path DIR     scan DIR instead of this checkout
 #   ./update.sh --deploy       deploy whatever was newly adopted (opt-in)
 #
-# Built for cron:
+# Built for cron, installed by ./setup.sh:
 #
-#   */15 * * * * /home/carlos/irabelle-stack/update.sh >> /home/carlos/irabelle-update.log 2>&1
+#   0 */12 * * * /home/carlos/irabelle-stack/update.sh
 #
 # Dockhand has no directory watcher, so a stack added to this repo does not
 # register itself. What it does expose is the API behind its Import button:
@@ -122,11 +122,13 @@ api() {
   local method=$1 path=$2 body=${3:-}
   local auth=()
   [ -n "${DOCKHAND_TOKEN:-}" ] && auth=(-H "Authorization: Bearer $DOCKHAND_TOKEN")
+  # -f so an HTTP error fails here, instead of an error body being handed to the
+  # JSON parsers and surfacing as something misleading like "no environments".
   if [ -n "$body" ]; then
-    curl -sS -m 120 -X "$method" "$DOCKHAND_URL$path" "${auth[@]}" \
+    curl -fsS -m 120 -X "$method" "$DOCKHAND_URL$path" "${auth[@]}" \
          -H 'Content-Type: application/json' --data-binary "$body"
   else
-    curl -sS -m 120 -X "$method" "$DOCKHAND_URL$path" "${auth[@]}"
+    curl -fsS -m 120 -X "$method" "$DOCKHAND_URL$path" "${auth[@]}"
   fi
 }
 
@@ -145,7 +147,8 @@ fi
 say "Dockhand at $DOCKHAND_URL"
 api GET /api/environments >"$TMP/envs.json" \
   || die "cannot reach the Dockhand API at $DOCKHAND_URL"
-api GET /api/stacks/sources >"$TMP/sources.json"
+api GET /api/stacks/sources >"$TMP/sources.json" \
+  || die "Dockhand rejected GET /api/stacks/sources"
 
 say "Scanning $SCAN_PATH"
 api POST /api/stacks/scan "{\"path\":\"$SCAN_PATH\"}" >"$TMP/scan.json"
@@ -167,7 +170,8 @@ sources = load("sources.json", {})
 scan = load("scan.json", {})
 
 if not envs:
-    sys.exit("no Dockhand environments are configured")
+    sys.exit("Dockhand has no environments configured.\n"
+             "        Add one in Dockhand (Settings -> Environments), then re-run.")
 
 if envsel:
     matches = [e for e in envs if str(e.get("id")) == envsel or e.get("name") == envsel]

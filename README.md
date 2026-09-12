@@ -60,7 +60,10 @@ work Dockhand cannot do for itself:
    that instead, so it can carry extra variables);
 2. create the shared `app-bridge` network Dockhand attaches to;
 3. generate the root CA behind the `*.$TLD` certificates;
-4. start **Dockhand** and print the URL to open.
+4. start **Dockhand** and print the URL to open;
+5. give Dockhand the two things that are not in git — the local environment it
+   needs, and this checkout as an external stack path — so a fresh clone is
+   usable without clicking through onboarding.
 
 It does **not** start any other stack. From there you deploy what you want in
 Dockhand — `traefik` first, since every other service is published through it,
@@ -71,13 +74,15 @@ published directly (`DOCKHAND_PORT`, default 3000) — that URL is the
 chicken-and-egg escape hatch. It bypasses Traefik's TLS, so **turn on
 authentication**; `setup.sh` warns if it is still off.
 
-It also offers to install a cron job running `update.sh`, which pulls this
-checkout and makes newly added stacks *available* in Dockhand — it never
-deploys them:
+It also installs two cron jobs — `update.sh`, which every 12 hours pulls this
+checkout and makes newly added stacks *available* in Dockhand, and the
+certificate watcher at boot (the issued certificates live in the checkout and
+are not in git either). Neither one deploys anything, and neither leaves a log
+file behind:
 
 ```sh
-./setup.sh --cron        # install without asking
-./setup.sh --no-cron     # never ask
+./setup.sh               # installs them by default
+./setup.sh --no-cron     # skip them
 ```
 
 `setup.sh` never creates directories, never issues service certificates and
@@ -139,10 +144,10 @@ adopts the rest:
 ./update.sh --deploy       # adopt, then deploy (opt-in)
 ```
 
-It is meant for cron, and `setup.sh` offers to install it:
+It is meant for cron, and `setup.sh` installs it:
 
 ```cron
-*/15 * * * * /home/carlos/irabelle-stack/update.sh >> /home/carlos/irabelle-update.log 2>&1
+0 */12 * * * /home/carlos/irabelle-stack/update.sh
 ```
 
 Registering a stack is inert — no containers are created, nothing is started,
