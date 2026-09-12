@@ -1,6 +1,15 @@
 api:
   insecure: true
 
+# The container healthcheck pings this endpoint (`traefik healthcheck --ping`).
+# Without it there is no /ping handler: the request falls through to the
+# internal API entrypoint, gets a 404, and Docker reports the container
+# unhealthy even though it is serving perfectly well. `traefik` is that
+# internal entrypoint on :8080, reachable only from inside the container — so
+# this adds nothing on :80 or :443.
+ping:
+  entryPoint: traefik
+
 entryPoints:
   web:
     address: ":80"
