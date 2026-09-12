@@ -91,10 +91,17 @@ env_tld() {
 }
 
 say "Configuration"
+# A stack's .env.example is a template: @REPO_DIR@ expands to this checkout's
+# absolute path, which is what the dockhand stack needs for matching paths
+# (its compose mounts the checkout at the same path inside the container).
+write_env_from() {
+  sed "s|@REPO_DIR@|$REPO_DIR|g" "$1" >"$2"
+}
+
 if [ -f .env ]; then
   note ".env exists — left untouched"
 elif [ -f .env.example ]; then
-  cp .env.example .env
+  write_env_from .env.example .env
   note "created .env from .env.example — review it"
 else
   echo "no .env and no .env.example at the repo root" >&2
@@ -105,7 +112,7 @@ ROOT_TLD=$(env_tld .env)
 for s in "${STACKS[@]}"; do
   if [ ! -f "$s/.env" ]; then
     if [ -f "$s/.env.example" ]; then
-      cp "$s/.env.example" "$s/.env"
+      write_env_from "$s/.env.example" "$s/.env"
       note "$s/.env created from $s/.env.example"
     else
       cp .env "$s/.env"

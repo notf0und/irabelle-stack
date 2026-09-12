@@ -3,11 +3,24 @@ services:
     image: fnsys/dockhand:latest
     container_name: dockhand
     env_file: .env
+    environment:
+      # "Matching paths": Dockhand runs `docker compose` inside this container,
+      # so a relative bind mount in a stack (./config/foo) resolves to an
+      # absolute path *inside the container* — and the host daemon then looks
+      # for that same path on the host. If the two differ, Docker silently
+      # creates the path, empty; a missing *file* mount even becomes a
+      # directory. Mounting the checkout at the same path on both sides is what
+      # makes relative mounts work. setup.sh fills STACK_ROOT in from
+      # @REPO_DIR@ in dockhand/.env.example.
+      DATA_DIR: ${STACK_ROOT:?STACK_ROOT is unset - run ./setup.sh, or set it in dockhand/.env}/dockhand/config/dockhand
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - /etc/localtime:/etc/localtime:ro
       - /etc/timezone:/etc/timezone:ro
-      - ./config/dockhand:/app/data
+      - ${STACK_ROOT:?STACK_ROOT is unset - run ./setup.sh, or set it in dockhand/.env}:${STACK_ROOT}
+      # Legacy: the pre-matching-paths layout. Anything already imported from
+      # this path keeps working; drop it once the stacks have been re-imported
+      # from the path above.
       - ../:/app/data/stacks/irabelle
     networks:
       - app-bridge

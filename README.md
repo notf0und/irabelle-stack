@@ -87,6 +87,30 @@ Non-interactive equivalents:
 never overwrites an existing `.env`, root CA or certificate. It is safe to
 re-run.
 
+### Deploying through Dockhand (or any git-based tool)
+
+These stacks work from a git-based deploy, with one difference: `.env` is
+gitignored, so a fresh checkout does not have one and there is nothing for
+Compose to interpolate. The values come from the tool instead — in Dockhand,
+the stack's **Environment variables** panel:
+
+| Variable | Value |
+| --- | --- |
+| `TLD` | `test` |
+| `PIHOLE_PASSWORD` | the Pi-hole admin password |
+| `PIHOLE_IP` | `192.168.40.5` |
+
+`env_file` is declared optional in `adblock/compose.yml` for exactly this
+reason, so a missing `.env` is not an error, and Pi-hole is configured entirely
+from those panel values. The same variables in `adblock/.env` (via `setup.sh`)
+work identically for the CLI path — both at once is fine, the file wins.
+
+One caveat if you use Dockhand: before **1.0.40**, Deploy/Sync passed those
+variables to Compose but Start/Stop/Down did not, so a stack with any `${VAR}`
+would deploy and then fail on every later action
+([#1313](https://github.com/Finsys/dockhand/issues/1313)). Upgrade, or operate
+the stack through Deploy/Sync only.
+
 ## Configuration
 
 Each stack reads its own `.env` from its own directory. The repo root has the
