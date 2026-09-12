@@ -13,14 +13,15 @@ services:
       - app-bridge
     labels:
       traefik.enable: true
-      traefik.http.routers.dockhand.rule: Host("dockhand") || Host("dockhand.ira")
+      # TLD comes from .env (see .env.example). Compose fails fast if it is unset.
+      traefik.http.routers.dockhand.rule: Host("dockhand") || Host("dockhand.${TLD:?TLD is not set in .env (see .env.example)}")
       traefik.http.routers.dockhand.entrypoints: web
       traefik.http.routers.dockhand.service: dockhand
       traefik.http.routers.dockhand.middlewares: dockhand
       traefik.http.services.dockhand.loadbalancer.server.port: 3000
       traefik.http.middlewares.dockhand.redirectScheme.scheme: https
 
-      traefik.http.routers.dockhand-https.rule: Host("dockhand") || Host("dockhand.ira")
+      traefik.http.routers.dockhand-https.rule: Host("dockhand") || Host("dockhand.${TLD:?TLD is not set in .env (see .env.example)}")
       traefik.http.routers.dockhand-https.entrypoints: websecure
       traefik.http.routers.dockhand-https.tls: true
     restart: unless-stopped

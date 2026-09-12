@@ -1,0 +1,31 @@
+# ---------------------------------------------------------------------------
+# irabelle-stack — keep per-client configuration, secrets and generated
+# runtime state OUT of git, so that:
+#   * no credential ever reaches the repository, and
+#   * `git status` stays clean on every client after the stack has been run.
+#
+# Patterns are written to cover future stacks too (`**/`), not just the two
+# that exist today.
+# ---------------------------------------------------------------------------
+
+# Per-client configuration: TLD, timezone, container uid/gid and anything a
+# client adds later. ./setup.sh copies .env.example into .env (repo root) and
+# then into every stack that does not have its own copy yet. A stack may ship
+# its own .env.example, which is committed too and takes precedence for it.
+.env
+.env.*
+!.env.example
+
+# Generated TLS material: leaf certificates, their private keys, the serial
+# file and the tls.yml that Traefik's file provider reads.
+**/config/certificates/*
+**/generate_certificates/root-certificates/
+**/generate_certificates/tmp/
+
+# Runtime logs. The access log keeps request headers, so it can contain
+# Authorization/Cookie values — never commit it.
+**/config/logs/*
+
+# Application state written by containers next to their compose file:
+# .encryption_key, sqlite database, icon cache.
+**/config/dockhand/*
