@@ -162,17 +162,24 @@ done
 note "stacks found: ${STACKS[*]}"
 
 # Per-install config, kept out of git so a `git pull` can never be blocked by a
-# local edit — the same deal as .env above. Traefik's static config is the one
-# people actually tweak (log level, ping, entrypoints), so it ships as an
-# .example and is copied into place here.
-if [ -f traefik/config/traefik.yml.example ]; then
-  if [ -f traefik/config/traefik.yml ]; then
-    note "traefik/config/traefik.yml exists — left untouched"
-  else
-    cp traefik/config/traefik.yml.example traefik/config/traefik.yml
-    note "created traefik/config/traefik.yml from traefik.yml.example"
+# local edit — the same deal as .env above. Each one ships as a committed
+# .example and is copied into place here: Traefik's static config, which people
+# tweak (log level, ping, entrypoints), and Unbound's, which decides whether
+# this box recurses or forwards to somebody else's resolver.
+for f in traefik/config/traefik.yml adblock/config/unbound/unbound.conf; do
+  [ -f "$f.example" ] || continue
+  if [ -d "$f" ]; then
+    # A file mount whose source was missing left Docker to create a *directory*
+    # here. Clear it so the copy below can happen (see the bind-mount section).
+    rmdir "$f" 2>/dev/null && warn "removed an empty directory at $f (left by Docker)"
   fi
-fi
+  if [ -f "$f" ]; then
+    note "$f exists — left untouched"
+  else
+    cp "$f.example" "$f"
+    note "created $f from $f.example"
+  fi
+done
 
 # --- 2. the shared network ---------------------------------------------------
 say "Docker network"
@@ -265,7 +272,7 @@ done
 # them yours — new files get it, and new subdirectories inherit it recursively —
 # without changing how any container runs and without hiding the data in a
 # volume. Needs the `acl` package; the warning below says so when it is absent.
-ACL_DIRS=(adblock/config/etc-pihole dockhand/config/dockhand traefik/config/logs)
+ACL_DIRS=(adblock/config/pihole dockhand/config/dockhand traefik/config/logs)
 if command -v setfacl >/dev/null 2>&1; then
   for d in "${ACL_DIRS[@]}"; do
     [ -d "$REPO_DIR/$d" ] || continue
@@ -275,7 +282,7 @@ if command -v setfacl >/dev/null 2>&1; then
     setfacl -R -m "u:$(id -un):rwX" "$REPO_DIR/$d" 2>/dev/null || true
   done
 else
-  warn "setfacl not found: files a container writes under adblock/config/etc-pihole,"
+  warn "setfacl not found: files a container writes under adblock/config/pihole,"
   warn "dockhand/config/dockhand or traefik/config/logs stay root-owned (readable,"
   warn "not editable). Install it once with: sudo apt install acl — then re-run this."
 fi

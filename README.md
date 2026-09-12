@@ -17,7 +17,8 @@ dashboard — that publishes services under an internal domain
 ├── traefik/
 │   ├── compose.yml                  # reads ${TLD} from .env
 │   ├── config/
-│   │   ├── traefik.yml              # static config (providers, entrypoints)
+│   │   ├── traefik.yml.example      # static config; setup.sh copies it into place
+│   │   ├── traefik.yml              # your copy, edit away — not in git
 │   │   ├── certificates/            # written by our scripts, as you — not in git
 │   │   └── logs/                    # the certificate watcher's log — not in git
 │   └── generate_certificates/
@@ -31,10 +32,19 @@ dashboard — that publishes services under an internal domain
 └── adblock/
     ├── compose.yml                  # Pi-hole + Unbound, on the Docker VLAN
     ├── .env.example                 # TLD, TZ, PIHOLE_PASSWORD, static IPs
-    └── config/
-        ├── dnsmasq.d/99-irabelle.conf   # the *.$TLD wildcard
-        └── etc-pihole/                  # runtime state, not in git
+    └── config/                          # one directory per service
+        ├── pihole/                      #   → /etc/pihole
+        │   ├── dnsmasq.d/99-irabelle.conf   # the *.$TLD wildcard
+        │   └── (database, blocklists — runtime state, not in git)
+        └── unbound/
+            ├── unbound.conf.example     # recursive resolver; setup.sh copies it
+            └── unbound.conf             # your copy — not in git
 ```
+
+In a stack with more than one service, each service keeps its config and state
+in `{stack}/config/{service}/` — `adblock` has `config/pihole/` (which *is* its
+`/etc/pihole`) and `config/unbound/`. A single-service stack keeps its config
+directly under `{stack}/config/`.
 
 Every immediate subdirectory that contains a `compose.yml` is a **stack**.
 `setup.sh` discovers them, so adding a stack means adding a directory — no
@@ -145,7 +155,7 @@ where you can read and edit it. Two things make that work:
   itself — `dockhand/config/dockhand`, `traefik/config/logs`, plus every bind
   mount source — **as you**, so no directory here is ever root-owned.
 * It then puts a **default ACL** on the directories containers write into
-  (`adblock/config/etc-pihole`, `dockhand/config/dockhand`,
+  (`adblock/config/pihole`, `dockhand/config/dockhand`,
   `traefik/config/logs`). New files inherit it, new subdirectories inherit it
   recursively, and the upshot is that root-written files stay yours to edit and
   root-written directories stay yours to delete. It needs the `acl` package
@@ -481,6 +491,9 @@ committed by accident:
 | --- | --- |
 | `.env`, `.env.*` | per-client config; may grow secrets (`.env.example` is committed) |
 | `host.env` | host networking for `host-vlan.sh` (`host.env.example` is committed) |
+| `**/config/traefik.yml` | per-install static config (`traefik.yml.example` is committed) |
+| `**/config/unbound/unbound.conf` | per-install resolver config (`unbound.conf.example` is committed) |
+| `**/config/pihole/*` | Pi-hole's database, blocklists and settings (`…/pihole/dnsmasq.d/` stays tracked) |
 | `**/config/certificates/*` | leaf certificates, **private keys**, generated `tls.yml` |
 | `**/generate_certificates/root-certificates/` | the private root CA |
 | `**/config/logs/*` | Traefik's access log keeps request headers (cookies, auth) |
@@ -490,3 +503,11 @@ The patterns use `**/` so any stack added later is covered without touching
 `.gitignore`. Nothing generated is committed and no `.gitkeep` placeholders are
 needed: the runtime directories are created by the scripts and containers that
 write into them.
+
+The rule behind the list: **tracked files are the ones a `git pull` must be able
+to update; anything an install or its owner edits lives outside git** and is
+created by `setup.sh` from a committed `.example`. Editing one of those can
+never block a pull. A tracked file is expected to stay pristine on a running
+install, and if one is modified the pull stops with *"Your local changes to the
+following files would be overwritten"* — which is the signal that the file
+belongs in this list instead.

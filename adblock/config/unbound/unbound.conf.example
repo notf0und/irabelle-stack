@@ -1,0 +1,81 @@
+# Unbound for the LAN: recursive from the root, DNSSEC-validating, and usable
+# only by Pi-hole.
+#
+# This file exists because the image's own config *forwards* everything
+# (`forward-zone: name: "."` → Cloudflare over DNS-over-TLS). That resolves
+# fine, but it hands one third party every name the LAN looks up — which is the
+# opposite of the reason for running a local resolver. Mounting this file over
+# the image's unbound.conf replaces the forwarder with recursion from the root
+# servers, so no resolver provider sees the queries. What remains visible is the
+# plain-text DNS on the wire, i.e. the ISP — that is the trade, and it is why
+# this is a deliberate choice rather than a default nobody looked at.
+#
+# Modelled on the reference server's config (station), scaled down for a small
+# box: two threads, modest caches, and no query logging — Pi-hole keeps the
+# query history, and logs go to stdout so nothing root-owned is written next to
+# the compose file.
+#
+# The trust anchor ships with the image (`var/root.key`) and is left alone, so
+# DNSSEC keeps working and updates itself inside the container.
+server:
+    directory: "/opt/unbound/etc/unbound"
+    username: "_unbound"
+    chroot: "/opt/unbound/etc/unbound"
+    do-daemonize: no
+    verbosity: 1
+
+    # The container's only network is the private bridge, so listen on it...
+    interface: 0.0.0.0@53
+    # ...but answer only Pi-hole. The subnet rather than a /32 because Pi-hole's
+    # address on that private network is assigned by Docker, not pinned.
+    access-control: 127.0.0.1/32 allow
+    access-control: 10.77.40.0/24 allow
+
+    # Recursion, not forwarding: there is deliberately no forward-zone here, so
+    # Unbound asks the root and authoritative servers itself (built-in root
+    # hints; add a root-hints file only to override them).
+    # Internal networks are IPv4-only, and this container has no IPv6, so
+    # answering over IPv6 would just add failed lookups.
+    do-ip6: no
+
+    # DNSSEC
+    auto-trust-anchor-file: "var/root.key"
+    val-clean-additional: yes
+    harden-dnssec-stripped: yes
+    harden-algo-downgrade: yes
+    harden-unknown-additional: yes
+    harden-glue: yes
+    harden-below-nxdomain: yes
+    harden-large-queries: yes
+    harden-short-bufsize: yes
+    aggressive-nsec: yes
+
+    # Privacy, and resistance to cache-poisoning games
+    qname-minimisation: yes
+    use-caps-for-id: yes
+    hide-identity: yes
+    hide-version: yes
+    deny-any: yes
+    unwanted-reply-threshold: 10000
+    private-address: 10.0.0.0/8
+    private-address: 172.16.0.0/12
+    private-address: 192.168.0.0/16
+    private-address: 169.254.0.0/16
+
+    # Caches: small box, and Pi-hole's dnsmasq caches the popular answers
+    # anyway. 1232 is the EDNS buffer size that survives the emulated WAN's
+    # 1492-byte MTU.
+    msg-cache-size: 64m
+    rrset-cache-size: 128m
+    neg-cache-size: 4m
+    cache-min-ttl: 60
+    cache-max-ttl: 86400
+    edns-buffer-size: 1232
+    num-threads: 2
+    so-reuseport: yes
+    prefetch: yes
+    serve-expired: yes
+    minimal-responses: yes
+    ede: yes
+    log-time-ascii: yes
+    log-servfail: yes

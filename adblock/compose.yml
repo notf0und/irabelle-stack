@@ -10,7 +10,8 @@
 # it off the LAN entirely: the mvance image's default config allows every
 # 192.168.x.x address to query it, so on a VLAN address any LAN device could
 # use this box as an open resolver and bypass Pi-hole's blocking. With no VLAN
-# address there is nothing to reach — and no unbound.conf to ship.
+# address there is nothing to reach — and the config we ship narrows
+# access-control to that private subnet as well, so it is closed twice over.
 #
 # Pi-hole is *additionally* on app-bridge. That is not optional: a macvlan
 # container cannot be reached from its own parent interface, so neither the
@@ -19,9 +20,18 @@
 
 services:
   unbound:
+    # :latest, with our own config mounted over the image's unbound.conf below —
+    # so what this resolver does is whatever config/unbound says, not whatever
+    # the image ships or changes to next.
     image: mvance/unbound:latest
     container_name: unbound
     restart: unless-stopped
+    volumes:
+      # Replaces the image's config, which forwards every query to Cloudflare
+      # over DoT. Ours recurses from the root instead. Read-only: Unbound has
+      # nothing to write here (its DNSSEC trust anchor lives in the image and
+      # updates inside the container).
+      - ./config/unbound/unbound.conf:/opt/unbound/etc/unbound/unbound.conf:ro
     networks:
       adblock:
         ipv4_address: 10.77.40.6
@@ -57,11 +67,15 @@ services:
       app-bridge: {}
       adblock: {}
     volumes:
-      - ./config/etc-pihole:/etc/pihole
+      # One directory per service — this stack has two, so Pi-hole's things live
+      # under pihole/ and Unbound's under unbound/, rather than at config/ root.
+      # config/pihole *is* the container's /etc/pihole (database, blocklists,
+      # settings), with our dnsmasq drop-in nested inside it.
+      - ./config/pihole:/etc/pihole
       # Single file, not the whole directory: Pi-hole keeps its generated
       # dnsmasq config inside the container, and a directory mount would drop
       # that into the repo.
-      - ./config/dnsmasq.d/99-irabelle.conf:/etc/dnsmasq.d/99-irabelle.conf:ro
+      - ./config/pihole/dnsmasq.d/99-irabelle.conf:/etc/dnsmasq.d/99-irabelle.conf:ro
     labels:
       traefik.enable: true
       traefik.http.routers.pihole.rule: Host("pihole") || Host("pihole.${TLD:?TLD is unset - set it in adblock/.env or in the Dockhand stack environment panel}")

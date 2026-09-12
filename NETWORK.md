@@ -113,8 +113,8 @@ services:
       app-bridge: {}                           # gotcha 2 — required, not optional
       adblock: {}
     volumes:
-      - ./config/etc-pihole:/etc/pihole
-      - ./config/dnsmasq.d/99-irabelle.conf:/etc/dnsmasq.d/99-irabelle.conf:ro
+      - ./config/pihole:/etc/pihole
+      - ./config/pihole/dnsmasq.d/99-irabelle.conf:/etc/dnsmasq.d/99-irabelle.conf:ro
 
 networks:
   app-macvlan: {external: true, driver: macvlan}
@@ -124,7 +124,7 @@ networks:
 
 `adblock/.env` carries `TLD`, `TZ`, `PIHOLE_PASSWORD` and `PIHOLE_IP`, and is
 gitignored. The `.test` wildcard lives in
-`adblock/config/dnsmasq.d/99-irabelle.conf` — the same mechanism the station
+`adblock/config/pihole/dnsmasq.d/99-irabelle.conf` — the same mechanism the station
 build uses (`etc_dnsmasq_d = true` plus `address=/.domain/ip` files):
 
 ```

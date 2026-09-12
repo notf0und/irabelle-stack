@@ -32,6 +32,7 @@ host.env
 # update; anything an install or its owner edits lives here instead, so a pull
 # can never be blocked by a local edit.
 **/config/traefik.yml
+**/config/unbound/unbound.conf
 
 # Runtime logs, written by containers as root — the default ACL setup.sh puts on
 # this directory is what keeps them editable without sudo.
@@ -42,5 +43,10 @@ host.env
 **/config/dockhand/*
 
 # Pi-hole's own state: pihole.toml holds the web password and API token, and
-# gravity.db is a full copy of the blocklists.
-**/config/etc-pihole/*
+# gravity.db is a full copy of the blocklists. The dnsmasq drop-in sitting next
+# to it is ours, so it stays tracked.
+#
+# A stack with more than one service keeps one directory per service —
+# {stack}/config/{service}/ — which is what pihole/ and unbound/ are here.
+**/config/pihole/*
+!**/config/pihole/dnsmasq.d/
