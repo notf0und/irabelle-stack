@@ -27,12 +27,12 @@ host.env
 **/generate_certificates/root-certificates/
 **/generate_certificates/tmp/
 
-# Runtime logs. The access log keeps request headers, so it can contain
-# Authorization/Cookie values — never commit it.
+# Runtime logs, written by containers as root — the default ACL setup.sh puts on
+# this directory is what keeps them editable without sudo.
 **/config/logs/*
 
-# Application state written by containers next to their compose file:
-# .encryption_key, sqlite database, icon cache.
+# Dockhand's state, written by the container: .encryption_key, sqlite database,
+# icon cache.
 **/config/dockhand/*
 
 # Pi-hole's own state: pihole.toml holds the web password and API token, and

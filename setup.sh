@@ -199,10 +199,9 @@ done
 # --- bind-mount paths --------------------------------------------------------
 # Docker creates a missing bind-mount source itself — as root, mode 0755. On a
 # directory mount that leaves a root-owned directory inside the checkout, and a
-# checkout you cannot write to is one you cannot delete: removing
-# `dockhand/config/dockhand` needs write permission on `dockhand/config`, which
-# Docker created and you do not own. So create every in-checkout mount source
-# first, as you, and Docker never has to invent one.
+# checkout you cannot write to is one you cannot delete: `rm -rf` needs write
+# permission on the parent, which Docker owns and you do not. So create every
+# in-checkout mount source first, as you, and Docker never has to invent one.
 say "Bind mounts"
 PRE_CREATED=0
 for s in "${STACKS[@]}"; do
@@ -234,21 +233,39 @@ PY
 done
 [ "$PRE_CREATED" -gt 0 ] || note "nothing missing — Docker has no reason to create anything"
 
-# Traefik creates config/logs itself at startup (traefik.yml sets
-# log.filepath: /config/logs/traefik.log) — inside the container, as root. That
-# path is not a mount source, so the loop above never sees it, and a root-owned
-# logs/ then blocks cert-watcher.sh: it runs as you, from cron, and writes its
-# own log there. A failing log write aborts it, which is easy to misread as
-# "the watcher is broken". Create it while the checkout is still yours.
-for d in traefik/config/logs traefik/config/certificates; do
+# Paths created by a container or a script rather than by compose, so the loop
+# above never sees them: Docker or the container would create them itself, as
+# root, and a root-owned directory inside the checkout cannot be emptied
+# without sudo. Create them here, while they are still yours.
+for d in dockhand/config/dockhand traefik/config/logs traefik/config/certificates; do
   if [ ! -d "$REPO_DIR/$d" ]; then
     mkdir -p "$REPO_DIR/$d"
     note "created $d"
   elif [ ! -w "$REPO_DIR/$d" ]; then
-    warn "$d is not writable by $(id -un) — cert-watcher.sh cannot log or write certificates there"
+    warn "$d is not writable by $(id -un) (left root-owned by an earlier run)"
     warn "fix once with: sudo chown -R $(id -un):$(id -gn) '$REPO_DIR/$d'"
   fi
 done
+
+# Those directories are yours, but the containers run as root, so the files they
+# write inside are root-owned: readable, not editable. A *default* ACL makes
+# them yours — new files get it, and new subdirectories inherit it recursively —
+# without changing how any container runs and without hiding the data in a
+# volume. Needs the `acl` package; the warning below says so when it is absent.
+ACL_DIRS=(adblock/config/etc-pihole dockhand/config/dockhand traefik/config/logs)
+if command -v setfacl >/dev/null 2>&1; then
+  for d in "${ACL_DIRS[@]}"; do
+    [ -d "$REPO_DIR/$d" ] || continue
+    setfacl -m "d:u:$(id -un):rwX" -m "d:m:rwX" "$REPO_DIR/$d" 2>/dev/null \
+      || warn "could not set the default ACL on $d"
+    # Existing entries too, where they are already yours to change.
+    setfacl -R -m "u:$(id -un):rwX" "$REPO_DIR/$d" 2>/dev/null || true
+  done
+else
+  warn "setfacl not found: files a container writes under adblock/config/etc-pihole,"
+  warn "dockhand/config/dockhand or traefik/config/logs stay root-owned (readable,"
+  warn "not editable). Install it once with: sudo apt install acl — then re-run this."
+fi
 
 # Anything already root-owned in here came from a container start before this
 # script did that, and it will block `rm -rf` of the checkout.

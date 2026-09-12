@@ -18,8 +18,8 @@ dashboard — that publishes services under an internal domain
 │   ├── compose.yml                  # reads ${TLD} from .env
 │   ├── config/
 │   │   ├── traefik.yml              # static config (providers, entrypoints)
-│   │   ├── certificates/            # generated at runtime, not in git
-│   │   └── logs/                    # generated at runtime, not in git
+│   │   ├── certificates/            # written by our scripts, as you — not in git
+│   │   └── logs/                    # the certificate watcher's log — not in git
 │   └── generate_certificates/
 │       ├── 1-generate-root-certificates.sh
 │       ├── 2-site-certificate.sh
@@ -130,6 +130,40 @@ That distinction matters more than it looks: a **bind-mounted config file** —
 `traefik/config/traefik.yml`, say — is invisible to `docker compose up -d`. It
 sees no change in the service definition, leaves the container running, and the
 old configuration stays in effect. Restart or force-recreate the container.
+
+### Keeping the checkout yours
+
+Containers run as root, so the files they create in a bind mount are owned by
+root. Reading them is fine, but a root-owned **directory** inside the checkout
+cannot be emptied without `sudo` — `rm -rf` fails on it — which is the annoyance
+this layout exists to avoid.
+
+Nothing is hidden in a volume: everything a stack writes stays in the checkout,
+where you can read and edit it. Two things make that work:
+
+* `setup.sh` creates the directories a container would otherwise create for
+  itself — `dockhand/config/dockhand`, `traefik/config/logs`, plus every bind
+  mount source — **as you**, so no directory here is ever root-owned.
+* It then puts a **default ACL** on the directories containers write into
+  (`adblock/config/etc-pihole`, `dockhand/config/dockhand`,
+  `traefik/config/logs`). New files inherit it, new subdirectories inherit it
+  recursively, and the upshot is that root-written files stay yours to edit and
+  root-written directories stay yours to delete. It needs the `acl` package
+  (`sudo apt install acl`); `setup.sh` warns with that line if `setfacl` is
+  missing.
+
+The root CA and the issued certificates live in the checkout too, but our own
+scripts write them as you. A re-clone therefore issues a **new** CA — devices
+that trusted the old one must import the new one — while Pi-hole's and
+Dockhand's state, being ordinary directories here, simply goes with the
+checkout.
+
+If a root-owned path does turn up, `setup.sh` reports it and prints the fix:
+
+```sh
+find /path/to/irabelle-stack -user root              # look
+sudo chown -R $(id -un) /path/to/irabelle-stack      # then rm -rf works
+```
 
 ### Deploying through Dockhand (or any git-based tool)
 
@@ -375,10 +409,10 @@ crontab -e
 
 Worth knowing on a brand-new checkout: `traefik/config/certificates/` and
 `traefik/config/logs/` are not committed (nothing in them belongs in git), and
-they are not bind-mount targets, so Docker will not create them. The watcher
-creates both when it runs. If Traefik was started before they existed it will
-have logged and ignored the missing directory — restart it once after the first
-certificates appear:
+neither is a bind-mount source, so Docker does not create them. `setup.sh` does,
+as you, and the watcher fills them in. Traefik's file provider watches
+`config/certificates`, but it builds the certificate list at startup, so restart
+it once after the first certificates appear:
 
 ```sh
 docker compose -f traefik/compose.yml restart
@@ -449,7 +483,7 @@ committed by accident:
 | `host.env` | host networking for `host-vlan.sh` (`host.env.example` is committed) |
 | `**/config/certificates/*` | leaf certificates, **private keys**, generated `tls.yml` |
 | `**/generate_certificates/root-certificates/` | the private root CA |
-| `**/config/logs/*` | access log keeps request headers (cookies, auth) |
+| `**/config/logs/*` | Traefik's access log keeps request headers (cookies, auth) |
 | `**/config/dockhand/*` | `.encryption_key`, sqlite DB, icon cache |
 
 The patterns use `**/` so any stack added later is covered without touching

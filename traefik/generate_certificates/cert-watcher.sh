@@ -37,11 +37,12 @@ TLD=${TLD:-test}
 
 mkdir -p "$(dirname -- "$LOG_FILE")" "$CERT_DIR" 2>/dev/null || true
 
-# Logging must never be fatal. This runs as the checkout owner (from cron),
+# Logging must never be fatal: this runs as the checkout owner (from cron),
 # while Traefik — root, inside its container — creates config/logs for its own
 # log file, so appending here can hit EACCES. Under `set -e` the failing tee
 # used to abort the run *after* printing "generating certificate" and before
-# issuing anything, which looks exactly like a watcher that does nothing.
+# issuing anything, which looks exactly like a watcher that does nothing. The
+# default ACL setup.sh puts on that directory is what stops it recurring.
 LOG_WARNED=0
 log() {
   _msg=$(printf '[%s] %s' "$(date '+%Y-%m-%d %H:%M:%S')" "$*")
