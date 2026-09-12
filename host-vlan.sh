@@ -105,15 +105,34 @@ DOCKER_VLAN_SUBNET=${DOCKER_VLAN_SUBNET:-192.168.${DOCKER_VLAN_ID}.0/24}
 DOCKER_MACVLAN_NETWORK=${DOCKER_MACVLAN_NETWORK:-app-macvlan}
 KEEP_LAN_DEFAULT_ROUTE=${KEEP_LAN_DEFAULT_ROUTE:-0}
 
-# The NIC that currently carries the default route. On carlos that is enp1s0,
-# the single wired link to the client router.
+# Which NIC carries the VLAN.
+#
+# "The interface on the default route" is only a safe answer the *first* time:
+# once this script has run, the VLAN's own static default route (metric 50)
+# wins, so the default route points at the VLAN itself. Asking an existing VLAN
+# interface for its parent is authoritative, so try that first and only fall
+# back to the default route when the VLAN does not exist yet.
+vlan_parent() {
+  ip -o link show "$DOCKER_VLAN_NAME" 2>/dev/null \
+    | sed -n 's/.*@\([^:@]*\)[:@].*/\1/p' | head -1
+}
+default_route_nic() {
+  ip -4 route show default 2>/dev/null \
+    | awk '{for (i = 1; i <= NF; i++) if ($i == "dev") { print $(i + 1); exit }}'
+}
+
 if [ -z "${HOST_NIC:-}" ]; then
-  HOST_NIC=$(ip -4 route show default 2>/dev/null \
-    | awk '{for (i = 1; i <= NF; i++) if ($i == "dev") { print $(i + 1); exit }}')
+  HOST_NIC=$(vlan_parent)
+  if [ -z "$HOST_NIC" ]; then
+    HOST_NIC=$(default_route_nic)
+    [ "$HOST_NIC" = "$DOCKER_VLAN_NAME" ] && HOST_NIC=$(vlan_parent)
+  fi
 else
   HOST_NIC_EXPLICIT=1
 fi
 [ -n "${HOST_NIC:-}" ] || die "cannot detect the host NIC — pass --nic"
+[ "$HOST_NIC" != "$DOCKER_VLAN_NAME" ] \
+  || die "host NIC resolved to the VLAN itself ($DOCKER_VLAN_NAME) — pass --nic explicitly"
 case "$HOST_NIC" in
   wl*)
     [ -n "${HOST_NIC_EXPLICIT:-}" ] \
@@ -280,9 +299,14 @@ do_apply() {
   command -v netplan >/dev/null 2>&1 \
     || die "netplan not found — this script expects a netplan/networkd host"
 
+  local need_apply=1
   say "netplan"
   if [ -f "$NETPLAN_FILE" ] && diff -q <(printf '%s\n' "$body") "$NETPLAN_FILE" >/dev/null 2>&1; then
     note "$NETPLAN_FILE already correct"
+    if ip -4 -o addr show dev "$DOCKER_VLAN_NAME" 2>/dev/null | grep -q " $(vlan_iface_ip)/"; then
+      note "$DOCKER_VLAN_NAME already has $(vlan_iface_ip) — not touching the network"
+      need_apply=0
+    fi
   else
     if [ -f "$NETPLAN_FILE" ]; then
       backup="$NETPLAN_FILE.bak-$(date +%Y%m%d%H%M%S)"
@@ -294,31 +318,33 @@ do_apply() {
     note "wrote $NETPLAN_FILE"
   fi
 
-  if ! netplan generate; then
-    if [ -n "$backup" ]; then
-      cp -a "$backup" "$NETPLAN_FILE"
-      warn "restored $backup"
-    else
-      rm -f "$NETPLAN_FILE"
+  if [ "$need_apply" = 1 ]; then
+    if ! netplan generate; then
+      if [ -n "$backup" ]; then
+        cp -a "$backup" "$NETPLAN_FILE"
+        warn "restored $backup"
+      else
+        rm -f "$NETPLAN_FILE"
+      fi
+      die "netplan generate rejected the configuration — nothing was applied"
     fi
-    die "netplan generate rejected the configuration — nothing was applied"
-  fi
 
-  if [ "$MODE" = try ]; then
-    note "netplan try — confirm within 120s or it rolls back"
-    netplan try
-  else
-    note "applying (this changes the host's default route)"
-    netplan apply
-  fi
+    if [ "$MODE" = try ]; then
+      note "netplan try — confirm within 120s or it rolls back"
+      netplan try
+    else
+      note "applying (this changes the host's default route)"
+      netplan apply
+    fi
 
-  for i in $(seq 1 20); do
-    ip -4 -o addr show dev "$DOCKER_VLAN_NAME" 2>/dev/null \
-      | grep -q " $(vlan_iface_ip)/" && break
-    sleep 0.5
-  done
-  if ! ip -4 -o addr show dev "$DOCKER_VLAN_NAME" 2>/dev/null | grep -q " $(vlan_iface_ip)/"; then
-    warn "$DOCKER_VLAN_NAME did not get $(vlan_iface_ip) — is the switch port a trunk carrying id $DOCKER_VLAN_ID?"
+    for i in $(seq 1 20); do
+      ip -4 -o addr show dev "$DOCKER_VLAN_NAME" 2>/dev/null \
+        | grep -q " $(vlan_iface_ip)/" && break
+      sleep 0.5
+    done
+    if ! ip -4 -o addr show dev "$DOCKER_VLAN_NAME" 2>/dev/null | grep -q " $(vlan_iface_ip)/"; then
+      warn "$DOCKER_VLAN_NAME did not get $(vlan_iface_ip) — is the switch port a trunk carrying id $DOCKER_VLAN_ID?"
+    fi
   fi
 
   ensure_network || warn "the VLAN is configured; finish the network with: ./$(basename "$0") --network-only"
