@@ -8,7 +8,10 @@ dashboard — that publishes services under an internal domain
 ```
 .
 ├── .env.example                     # template for the per-client .env files
+├── host.env.example                 # host VLAN settings for host-vlan.sh
 ├── setup.sh                         # bootstrap: .env copies + root CA + pick stacks
+├── host-vlan.sh                     # host Docker VLAN + macvlan network (needs root)
+├── NETWORK.md                       # VLAN / macvlan / bridge layout and why
 ├── traefik/
 │   ├── compose.yml                  # reads ${TLD} from .env
 │   ├── config/
@@ -20,15 +23,25 @@ dashboard — that publishes services under an internal domain
 │       ├── 2-site-certificate.sh
 │       ├── 3-sync-tls-file.sh
 │       └── cert-watcher.sh
-└── dockhand/
-    ├── compose.yml                  # reads ${TLD} from .env
-    └── config/dockhand/             # runtime state, not in git
+├── dockhand/
+│   ├── compose.yml                  # reads ${TLD} from .env
+│   └── config/dockhand/             # runtime state, not in git
+└── adblock/
+    ├── compose.yml                  # Pi-hole + Unbound, on the Docker VLAN
+    ├── .env.example                 # TLD, TZ, PIHOLE_PASSWORD, static IPs
+    └── config/
+        ├── dnsmasq.d/99-irabelle.conf   # the *.$TLD wildcard
+        └── etc-pihole/                  # runtime state, not in git
 ```
 
 Every immediate subdirectory that contains a `compose.yml` is a **stack**.
 `setup.sh` discovers them, so adding a stack means adding a directory — no
 script changes. A stack may also ship its own `.env.example` (see
 [Configuration](#configuration)).
+
+`adblock` is the LAN's DNS: Pi-hole at 192.168.40.5 with a local recursive
+Unbound at 192.168.40.6, both real hosts on the Docker VLAN. It needs the host
+VLAN from `host-vlan.sh` first — see [NETWORK.md](NETWORK.md).
 
 ## Quickstart
 

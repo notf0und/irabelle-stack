@@ -231,18 +231,19 @@ fi
 # bridge would silently give containers the wrong connectivity.
 #
 # Ask compose for the resolved config rather than parsing the YAML ourselves: it
-# normalises name/driver/external and fills in defaults, so the answer is right
-# however the file is written or ordered.
+# normalises name/driver/external. An external network with no declared driver
+# comes back with an empty driver, which is reported as `unknown` — deliberately
+# not assumed to be a bridge.
 external_networks() {
   docker compose -f "$1" config 2>/dev/null | awk '
     function flush() {
-      if (in_net && ext && name != "") print name "\t" driver
+      if (in_net && ext && name != "") print name "\t" (driver == "" ? "unknown" : driver)
     }
-    /^networks:/ { in_net = 1; name = ""; driver = "bridge"; ext = 0; next }
+    /^networks:/ { in_net = 1; name = ""; driver = ""; ext = 0; next }
     /^[^[:space:]]/ { flush(); in_net = 0; next }
     !in_net { next }
     /^[[:space:]]+[A-Za-z0-9_.-]+:[[:space:]]*$/ {
-      flush(); name = $1; sub(/:$/, "", name); driver = "bridge"; ext = 0; next
+      flush(); name = $1; sub(/:$/, "", name); driver = ""; ext = 0; next
     }
     /^[[:space:]]+name:[[:space:]]*/ { name = $2; next }
     /^[[:space:]]+driver:[[:space:]]*/ { driver = $2; next }
@@ -263,6 +264,13 @@ for s in "${PICKED[@]}"; do
         printf '    Create the host VLAN and that network first:\n' >&2
         printf '        sudo ./host-vlan.sh\n' >&2
         printf '    Then re-run this script. See NETWORK.md for the address plan.\n' >&2
+        exit 1
+        ;;
+      unknown)
+        printf '\n\033[31m%s\033[0m\n' \
+          "$s declares the external network '$net' without a driver." >&2
+        printf '    setup.sh will not guess — add one, e.g. `driver: bridge`\n' >&2
+        printf '    (or `driver: macvlan` for a VLAN-backed network).\n' >&2
         exit 1
         ;;
       *)

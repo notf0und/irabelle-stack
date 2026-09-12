@@ -1,0 +1,84 @@
+# adblock — Pi-hole (LAN DNS + ad blocking) with a local recursive Unbound.
+#
+# Mirrors the layout running on `station`: Pi-hole at .5, Unbound at .6, and
+# Pi-hole's only upstream is Unbound. Nothing here depends on an external
+# resolver, and nothing depends on the host's own DNS stack — which is the
+# whole point of using macvlan rather than host networking.
+#
+# Both containers are real hosts on the router's Docker.Online VLAN (id 40,
+# 192.168.40.0/24), so LAN clients query Pi-hole directly at 192.168.40.5 and
+# the router needs no forwarding rule (`lan -> dockeron` is already allowed).
+#
+# Pi-hole is *additionally* on app-bridge. That is not optional: a macvlan
+# container cannot be reached from its own parent interface, so neither the
+# host nor any bridge container (Traefik included) can talk to 192.168.40.5.
+# The bridge attachment is how `pihole.$TLD` works at all.
+#
+# Unbound needs no bridge: Pi-hole reaches it over the macvlan network, where
+# sibling containers talk to each other directly in the kernel.
+
+services:
+  unbound:
+    image: mvance/unbound:latest
+    container_name: unbound
+    restart: unless-stopped
+    networks:
+      app-macvlan:
+        ipv4_address: ${UNBOUND_IP:-192.168.40.6}
+
+  pihole:
+    image: pihole/pihole:latest
+    container_name: pihole
+    hostname: pihole
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      TZ: ${TZ:-Pacific/Auckland}
+      # The only upstream. It is a sibling on the same VLAN, so the query never
+      # leaves the host.
+      FTLCONF_dns_upstreams: ${UNBOUND_IP:-192.168.40.6}
+      # Default is "local", which refuses queries from other subnets. LAN
+      # clients are on 192.168.1.x asking 192.168.40.5, so this is required.
+      FTLCONF_dns_listeningMode: all
+      # Pi-hole v6 only reads /etc/dnsmasq.d when this is on; the .test
+      # wildcard below lives there.
+      FTLCONF_misc_etc_dnsmasq_d: "true"
+      FTLCONF_webserver_api_password: ${PIHOLE_PASSWORD:?set PIHOLE_PASSWORD in adblock/.env}
+    networks:
+      app-macvlan:
+        ipv4_address: ${PIHOLE_IP:-192.168.40.5}
+      app-bridge: {}
+    volumes:
+      - ./config/etc-pihole:/etc/pihole
+      # Single file, not the whole directory: Pi-hole keeps its generated
+      # dnsmasq config inside the container, and a directory mount would drop
+      # that into the repo.
+      - ./config/dnsmasq.d/99-irabelle.conf:/etc/dnsmasq.d/99-irabelle.conf:ro
+    cap_add:
+      - NET_ADMIN
+    labels:
+      traefik.enable: true
+      traefik.http.routers.pihole.rule: Host("pihole") || Host("pihole.${TLD:?TLD is not set in .env}")
+      traefik.http.routers.pihole.entrypoints: web
+      traefik.http.routers.pihole.middlewares: pihole-tohttps
+      traefik.http.middlewares.pihole-tohttps.redirectscheme.scheme: https
+      traefik.http.services.pihole.loadbalancer.server.port: 80
+
+      traefik.http.routers.pihole-https.rule: Host("pihole") || Host("pihole.${TLD:?TLD is not set in .env}")
+      traefik.http.routers.pihole-https.entrypoints: websecure
+      traefik.http.routers.pihole-https.tls: true
+      # Pi-hole serves its UI only under /admin; send the bare host there.
+      traefik.http.routers.pihole-https.middlewares: pihole-admin
+      traefik.http.middlewares.pihole-admin.redirectregex.regex: ^https?://([^/]+)/?$$
+      traefik.http.middlewares.pihole-admin.redirectregex.replacement: https://$${1}/admin/
+
+networks:
+  app-macvlan:
+    external: true
+    # Declared so ./setup.sh can see what this is: it asks compose for the
+    # resolved config, and an external network without a driver tells it
+    # nothing — it would otherwise assume a bridge and create the wrong thing.
+    driver: macvlan
+  app-bridge:
+    external: true
+    driver: bridge

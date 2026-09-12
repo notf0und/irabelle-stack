@@ -83,83 +83,80 @@ Requirements and checks:
 - `sudo ./host-vlan.sh --status` shows the VLAN, the routes and the network;
 - `sudo ./host-vlan.sh --down` removes both and re-applies netplan.
 
-## 2. Pi-hole and Unbound
+## 2. `adblock` — Pi-hole and Unbound
 
-Two stacks, `pihole/` and `unbound/`, both on the macvlan so they are real hosts
-on the VLAN. Pi-hole needs a real address because LAN clients query it directly;
-Unbound only ever answers Pi-hole.
-
-`unbound/compose.yml`:
+One stack, `adblock/`, with both containers on the macvlan so they are real hosts
+on the VLAN: Pi-hole at **192.168.40.5**, Unbound at **192.168.40.6**, and
+Pi-hole's only upstream is Unbound. Nothing depends on an external resolver and
+nothing depends on the host's DNS stack — which is the point of macvlan over
+host networking.
 
 ```yaml
 services:
   unbound:
     image: mvance/unbound:latest
-    container_name: unbound
-    restart: unless-stopped
     networks:
       app-macvlan:
         ipv4_address: 192.168.40.6
 
-networks:
-  app-macvlan:
-    external: true
-```
-
-`pihole/compose.yml`:
-
-```yaml
-services:
   pihole:
     image: pihole/pihole:latest
-    container_name: pihole
-    hostname: pihole
-    restart: unless-stopped
     env_file: .env
     environment:
-      TZ: ${TZ}
-      FTLCONF_dns_upstreams: 192.168.40.6     # the local Unbound, nothing external
-      FTLCONF_dns_listeningMode: all          # see gotcha 1
-      FTLCONF_webserver_api_password: ${PIHOLE_PASSWORD:?set PIHOLE_PASSWORD in .env}
+      FTLCONF_dns_upstreams: 192.168.40.6      # the sibling, nothing external
+      FTLCONF_dns_listeningMode: all           # gotcha 1
+      FTLCONF_misc_etc_dnsmasq_d: "true"       # so the .test wildcard is read
+      FTLCONF_webserver_api_password: ${PIHOLE_PASSWORD:?}
     networks:
       app-macvlan:
         ipv4_address: 192.168.40.5
-      app-bridge: {}                          # so Traefik can publish the UI
+      app-bridge: {}                           # gotcha 2 — required, not optional
     volumes:
       - ./config/etc-pihole:/etc/pihole
+      - ./config/dnsmasq.d/99-irabelle.conf:/etc/dnsmasq.d/99-irabelle.conf:ro
     cap_add: [NET_ADMIN]
 
 networks:
-  app-macvlan:
-    external: true
-  app-bridge:
-    external: true
+  app-macvlan: {external: true, driver: macvlan}
+  app-bridge:  {external: true, driver: bridge}
 ```
 
-`PIHOLE_PASSWORD` goes in `pihole/.env`, which is gitignored.
+`adblock/.env` carries `TLD`, `TZ`, `PIHOLE_PASSWORD`, `PIHOLE_IP` and
+`UNBOUND_IP`, and is gitignored. The `.test` wildcard lives in
+`adblock/config/dnsmasq.d/99-irabelle.conf`:
 
-**Gotcha 1 — `FTLCONF_dns_listeningMode: all` is mandatory here.** The default
-is `local`, which answers only queries from its own subnet. Your LAN clients are
-on 192.168.1.x asking 192.168.40.5, so with the default they get nothing.
+```
+address=/test/192.168.1.2
+```
 
-**Gotcha 2 — bridge containers can't simply be pointed at the macvlan address.**
-A bridge container's packet to 192.168.40.5 leaves with a 172.x source; Pi-hole
-replies via *its* default route, which is the router at 192.168.40.1, and the
-router has no route back to 172.x — asymmetric, and it fails. Two ways out:
+**Gotcha 1 — `FTLCONF_dns_listeningMode: all` is mandatory.** The default is
+`local`, which answers only queries from its own subnet. LAN clients are on
+192.168.1.x asking 192.168.40.5, so with the default they get nothing.
 
-- attach Pi-hole to a bridge network too (as above) and point on-host consumers
-  at Pi-hole's bridge address; or
-- set the daemon-wide resolver in `/etc/docker/daemon.json`
-  (`"dns": ["192.168.40.5"]`), so the query is made by the host over the VLAN,
-  where the reply path is symmetric.
+**Gotcha 2 — the `app-bridge` attachment is required, and this is carlos-specific
+in the worst way.** Measured on carlos:
 
-For containers, prefer the first: it is explicit per stack.
+| from | to | |
+| --- | --- | --- |
+| LAN client (via router) | macvlan container | works — unicast to a MAC the switch learned on the host's port |
+| carlos (host) | macvlan container | **fails** |
+| bridge container (Traefik) | macvlan container | **fails** |
+| macvlan sibling | macvlan sibling | works — the kernel forwards it locally |
+| carlos (host) | the same container's **bridge** address | works |
 
-**Unbound's placement** is the one place I would not copy station exactly. It has
-no reason to hold a VLAN address — a private bridge shared with Pi-hole would do
-the same job without occupying a lease. Macvlan is what station does, so it is
-what is shown here; either works, since both are on `app-macvlan` and reach each
-other directly.
+macvlan children never talk to their parent interface, and the MT6000 does not
+reflect a frame back out the port it arrived on. So Pi-hole must be reachable
+two ways: `192.168.40.5` for the LAN, and its bridge address for everything on
+the host. Without that, `pihole.$TLD` can never load and carlos cannot query its
+own resolver.
+
+The sibling row is what makes the design work: Pi-hole → Unbound at
+192.168.40.6 never leaves the host, so Unbound needs no bridge of its own.
+
+**`FTLCONF_misc_etc_dnsmasq_d: "true"`** — Pi-hole v6 does not read
+`/etc/dnsmasq.d` unless this is set, and the `.test` wildcard lives there. If
+local names stop resolving, check it under Settings → All settings →
+`misc.etc_dnsmasq_d`.
 
 ## 3. Everything else: bridge networks, not macvlan
 
@@ -267,8 +264,15 @@ On the client router, after the host side is up:
   per-container, where a VLAN cuts off a whole segment.
 - **Macvlan containers can't be reached by name.** Docker's embedded DNS does
   not cover macvlan endpoints; address them by IP.
-- **The host reaches its own macvlan containers fine here** (measured on
-  station: `ping 192.168.10.5` from the host, 0% loss). The usual "macvlan can't
-  talk to its host" warning does not apply when the parent is a VLAN interface
-  the host also has an address on.
+- **The host cannot reach its own macvlan containers — on carlos.** Measured:
+  `carlos -> 192.168.40.x` fails, `bridge container -> 192.168.40.x` fails,
+  siblings work. It works on station (`ping 192.168.10.5`, 1.0ms) because that
+  home switch reflects the frame back out the port it came in on; the MT6000
+  does not. Never assume it works — test it, and give any container that needs
+  on-host access a bridge network too.
+- **An external network needs a declared `driver:`.** `docker compose config`
+  emits nothing for an external network without one, and `setup.sh` will refuse
+  rather than guess — guessing "bridge" is how a macvlan network gets created
+  with the wrong connectivity.
 - **`--down` refuses while containers are attached.** Stop the stacks first.
+
