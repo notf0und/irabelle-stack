@@ -39,9 +39,9 @@ Every immediate subdirectory that contains a `compose.yml` is a **stack**.
 script changes. A stack may also ship its own `.env.example` (see
 [Configuration](#configuration)).
 
-`adblock` is the LAN's DNS: Pi-hole at 192.168.40.5 with a local recursive
-Unbound at 192.168.40.6, both real hosts on the Docker VLAN. It needs the host
-VLAN from `host-vlan.sh` first — see [NETWORK.md](NETWORK.md).
+`adblock` is the LAN's DNS: Pi-hole at 192.168.40.5 on the Docker VLAN, with a
+local recursive Unbound on a private bridge behind it. It needs the host VLAN
+from `host-vlan.sh` first — see [NETWORK.md](NETWORK.md).
 
 ## Quickstart
 

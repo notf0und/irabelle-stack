@@ -25,7 +25,7 @@ Mirrors the layout already running on `station`.
 | Router gateway | 192.168.10.1 | 192.168.40.1 |
 | Macvlan network | `app-macvlan` | `app-macvlan` |
 | Pi-hole | 192.168.10.5 | **192.168.40.5** |
-| Unbound | 192.168.10.6 | **192.168.40.6** |
+| Unbound | 192.168.10.6 | 10.77.40.6 — private bridge, **not** on the VLAN (see §2) |
 
 The third octet follows the VLAN id — the same convention the router uses
 (`30` ↔ 192.168.30.x, `40` ↔ 192.168.40.x) — so one id moves everything.
@@ -85,25 +85,25 @@ Requirements and checks:
 
 ## 2. `adblock` — Pi-hole and Unbound
 
-One stack, `adblock/`, with both containers on the macvlan so they are real hosts
-on the VLAN: Pi-hole at **192.168.40.5**, Unbound at **192.168.40.6**, and
-Pi-hole's only upstream is Unbound. Nothing depends on an external resolver and
-nothing depends on the host's DNS stack — which is the point of macvlan over
-host networking.
+One stack, `adblock/`. Pi-hole is at **192.168.40.5** on the VLAN because LAN
+clients query it directly; Unbound is on a **private bridge** (10.77.40.6) and is
+reachable only by Pi-hole. Nothing depends on an external resolver and nothing
+depends on the host's DNS stack — which is the point of macvlan over host
+networking.
 
 ```yaml
 services:
   unbound:
     image: mvance/unbound:latest
     networks:
-      app-macvlan:
-        ipv4_address: 192.168.40.6
+      adblock:                                   # private bridge, this stack only
+        ipv4_address: 10.77.40.6
 
   pihole:
     image: pihole/pihole:latest
     env_file: .env
     environment:
-      FTLCONF_dns_upstreams: 192.168.40.6      # the sibling, nothing external
+      FTLCONF_dns_upstreams: 10.77.40.6        # nothing external
       FTLCONF_dns_listeningMode: all           # gotcha 1
       FTLCONF_misc_etc_dnsmasq_d: "true"       # so the .test wildcard is read
       FTLCONF_webserver_api_password: ${PIHOLE_PASSWORD:?}
@@ -111,23 +111,51 @@ services:
       app-macvlan:
         ipv4_address: 192.168.40.5
       app-bridge: {}                           # gotcha 2 — required, not optional
+      adblock: {}
     volumes:
       - ./config/etc-pihole:/etc/pihole
       - ./config/dnsmasq.d/99-irabelle.conf:/etc/dnsmasq.d/99-irabelle.conf:ro
-    cap_add: [NET_ADMIN]
 
 networks:
   app-macvlan: {external: true, driver: macvlan}
   app-bridge:  {external: true, driver: bridge}
+  adblock:     {driver: bridge, ipam: {config: [{subnet: 10.77.40.0/24}]}}
 ```
 
-`adblock/.env` carries `TLD`, `TZ`, `PIHOLE_PASSWORD`, `PIHOLE_IP` and
-`UNBOUND_IP`, and is gitignored. The `.test` wildcard lives in
-`adblock/config/dnsmasq.d/99-irabelle.conf`:
+`adblock/.env` carries `TLD`, `TZ`, `PIHOLE_PASSWORD` and `PIHOLE_IP`, and is
+gitignored. The `.test` wildcard lives in
+`adblock/config/dnsmasq.d/99-irabelle.conf` — the same mechanism the station
+build uses (`etc_dnsmasq_d = true` plus `address=/.domain/ip` files):
 
 ```
-address=/test/192.168.1.2
+address=/.test/192.168.1.2
+local=/.test/
 ```
+
+**Both lines are needed.** Since dnsmasq 2.86 an `address=` rule only answers A
+and AAAA queries — every other record type for that domain is *forwarded
+upstream*. Browsers do query more than A/AAAA (HTTPS/SVCB records), so without
+`local=` those lookups leave the box to chase a namespace that will never exist
+publicly, and they cannot be answered at all when the uplink is down. Measured
+with a 2.9x dnsmasq:
+
+| query | with `local=` | without `local=` |
+| --- | --- | --- |
+| `A foo.test` | 192.168.1.2 | 192.168.1.2 |
+| `TXT foo.test` | NOERROR, no answer (local) | forwarded upstream → timeout |
+
+It matters more if the TLD is ever a domain you own, because forwarding leaks
+internal hostnames to the resolver upstream. `--address=… --local=…` is the
+combination dnsmasq's own man page recommends for exactly this.
+
+**Why Unbound is not on the VLAN.** The `mvance/unbound` image generates its own
+config with `access-control: 192.168.0.0/16 allow`, so a VLAN address would make
+it a resolver that any device on the LAN could query directly — bypassing
+Pi-hole's blocking entirely. Unbound only ever answers Pi-hole, so it gets a
+private bridge instead. Nothing on the LAN can reach it, and there is no
+`unbound.conf` to maintain. (There is no DNSSEC path to get wrong either: the
+image's `auto-trust-anchor-file` is relative to its working directory and it
+creates the trust anchor itself.)
 
 **Gotcha 1 — `FTLCONF_dns_listeningMode: all` is mandatory.** The default is
 `local`, which answers only queries from its own subnet. LAN clients are on
