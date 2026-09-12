@@ -56,6 +56,38 @@ note() { printf '    %s\n' "$*"; }
 warn() { printf '\033[33m    WARN: %s\033[0m\n' "$*" >&2; }
 die()  { printf '\033[31mERROR: %s\033[0m\n' "$*" >&2; exit 1; }
 
+# A URL that is clickable in terminals supporting OSC 8 hyperlinks — which is
+# most of them, over SSH included. Falls back to plain text, and is skipped
+# entirely when stdout is not a terminal so redirecting setup.sh to a file does
+# not fill it with escape codes.
+print_url() {
+  if [ -t 1 ]; then
+    printf '    \033]8;;%s\033\\%s\033]8;;\033\\\n' "$1" "$1"
+  else
+    printf '    %s\n' "$1"
+  fi
+}
+
+# A headless server has no browser, and SSH cannot reach back into yours to
+# start one, so this only fires when there is a display to draw on: a local
+# desktop session, or `ssh -X` with a browser installed on the server.
+open_first_url() {
+  local url=${1:-}
+  [ -n "$url" ] || return 0
+
+  if [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ] && command -v xdg-open >/dev/null 2>&1; then
+    xdg-open "$url" >/dev/null 2>&1 &
+    note "asked xdg-open to open $url"
+    return 0
+  fi
+
+  if [ -n "${SSH_CONNECTION:-}" ]; then
+    note "over SSH there is no browser to launch here — the link above is"
+    note "clickable in most terminals, or open it from any device on the LAN"
+  fi
+  return 0
+}
+
 command -v docker >/dev/null 2>&1 || die "docker is not installed or not on PATH"
 command -v curl >/dev/null 2>&1 || die "curl is required"
 command -v python3 >/dev/null 2>&1 || die "python3 is required"
@@ -307,10 +339,14 @@ AUTH_CODE=$(curl -s -o /dev/null -w '%{http_code}' -m 5 \
 say "Dockhand is up — open one of these"
 # `ip -o` gives: "2: enp1s0    inet 192.168.1.2/24 brd ..." — dev is field 2,
 # the address is field 4.
-ip -4 -o addr show scope global 2>/dev/null | while read -r _ dev _ cidr _; do
+URLS=()
+while read -r _ dev _ cidr _; do
   case "$dev" in lo|docker*|br-*|veth*) continue ;; esac
-  printf '    http://%s:%s\n' "${cidr%%/*}" "$DOCKHAND_PORT"
-done
+  URLS+=("http://${cidr%%/*}:$DOCKHAND_PORT")
+done < <(ip -4 -o addr show scope global 2>/dev/null)
+
+for url in "${URLS[@]}"; do print_url "$url"; done
+open_first_url "${URLS[0]:-}"
 
 if [ "$AUTH_CODE" = 200 ]; then
   warn "authentication is OFF: anyone who can reach that URL can control Docker"

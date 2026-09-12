@@ -60,7 +60,9 @@ work Dockhand cannot do for itself:
    that instead, so it can carry extra variables);
 2. create the shared `app-bridge` network Dockhand attaches to;
 3. generate the root CA behind the `*.$TLD` certificates;
-4. start **Dockhand** and print the URL to open;
+4. start **Dockhand** and print the URL to open — as a clickable hyperlink, so
+   it works over SSH; it only tries to launch a browser itself when the host
+   has a display to draw on;
 5. give Dockhand the two things that are not in git — the local environment it
    needs, and this checkout as an external stack path — so a fresh clone is
    usable without clicking through onboarding.
