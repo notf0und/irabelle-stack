@@ -5,6 +5,9 @@
 #   ./setup.sh              prepare, start Dockhand, print its URL, and install
 #                           the two cron jobs
 #   ./setup.sh --no-cron    do not install the cron jobs
+#   ./setup.sh --trust-ca   also install the root CA into this host's own
+#                           trust store (sudo; every client device still
+#                           needs its own one-time step regardless)
 #
 # Any stack added later is still deployed from Dockhand's UI — setup.sh only
 # auto-starts what it can start safely (see step 4 below). What it does first
@@ -29,6 +32,7 @@ cd "$REPO_DIR"
 
 DOCKHAND_PORT=${DOCKHAND_PORT:-3000}
 CRON_MODE=yes
+TRUST_CA=no
 
 usage() {
   cat <<'EOF'
@@ -36,6 +40,11 @@ Usage: ./setup.sh [options]
 
   --no-cron     do not install the cron jobs
   --cron        (default) install them
+  --trust-ca    also install the root CA into this host's own trust store
+                (needs sudo; never done without this flag). This only
+                affects the host itself — every *client* device (phone,
+                laptop, ...) still needs the one-time manual step printed
+                at the end, regardless of this flag.
   -h, --help    this text
 
 Environment:
@@ -49,6 +58,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --cron) CRON_MODE=yes ;;
     --no-cron) CRON_MODE=no ;;
+    --trust-ca) TRUST_CA=yes ;;
     -h|--help) usage 0 ;;
     *) echo "Unknown option: $1" >&2; usage 2 ;;
   esac
@@ -524,16 +534,30 @@ else
   note "update.sh only registers new stacks — it never deploys them"
 
   # @reboot only fires at boot, so a fresh setup would otherwise leave nothing
-  # watching until the next reboot and no certificates after it. Start it now;
-  # the flock in the script makes a duplicate instance harmless.
+  # watching until the next reboot and no certificates after it. Start it now.
+  #
+  # Always restart it, even if one is already running: it reads TLD from
+  # .env once at process start, not on every loop iteration, so a TLD change
+  # (most commonly a rename) leaves an old instance quietly watching for the
+  # previous domain's hosts forever, issuing no certificates for the new one
+  # — exactly the bug this fixes. Matching on the full watcher path, not just
+  # the script's basename, so this only ever touches an instance started from
+  # this checkout, never another one.
   watcher="$REPO_DIR/traefik/generate_certificates/cert-watcher.sh"
-  if [ -x "$watcher" ] && ! pgrep -f 'cert-watcher\.sh' >/dev/null 2>&1; then
+  if [ -x "$watcher" ]; then
+    EXISTING_WATCHER_PIDS=$(pgrep -f "$watcher" || true)
+    if [ -n "$EXISTING_WATCHER_PIDS" ]; then
+      # shellcheck disable=SC2086
+      kill $EXISTING_WATCHER_PIDS 2>/dev/null || true
+      note "stopped the running cert-watcher.sh so it re-reads the current .env"
+    fi
     if command -v setsid >/dev/null 2>&1; then
       setsid "$watcher" >/dev/null 2>&1 &
     else
       nohup "$watcher" >/dev/null 2>&1 &
     fi
-    note "started cert-watcher.sh — certificates appear as Traefik registers services"
+    disown 2>/dev/null || true
+    note "cert-watcher.sh (re)started — certificates appear as Traefik registers services"
   fi
 fi
 
@@ -558,12 +582,81 @@ if [ "$AUTH_CODE" = 200 ]; then
   warn "on this host. Turn it on in Dockhand: Settings -> Authentication."
 fi
 
+# --- trust the root CA --------------------------------------------------------
+CA_CRT="$REPO_DIR/traefik/generate_certificates/root-certificates/root-ca.crt"
+if [ -f "$CA_CRT" ]; then
+  say "Root CA"
+  note "$CA_CRT"
+  CA_TRUSTED_HERE=no
+  if [ "$TRUST_CA" = yes ]; then
+    if command -v update-ca-certificates >/dev/null 2>&1; then
+      DEST=/usr/local/share/ca-certificates/irabelle-root.crt
+      if sudo cp "$CA_CRT" "$DEST" && sudo update-ca-certificates >/dev/null; then
+        note "trusted on this host: $DEST (Debian/Ubuntu, via update-ca-certificates)"
+        CA_TRUSTED_HERE=yes
+      else
+        warn "could not install the CA on this host — use the manual steps below"
+      fi
+    elif command -v update-ca-trust >/dev/null 2>&1; then
+      DEST=/etc/pki/ca-trust/source/anchors/irabelle-root.crt
+      if sudo cp "$CA_CRT" "$DEST" && sudo update-ca-trust; then
+        note "trusted on this host: $DEST (Fedora/RHEL, via update-ca-trust)"
+        CA_TRUSTED_HERE=yes
+      else
+        warn "could not install the CA on this host — use the manual steps below"
+      fi
+    else
+      warn "no known system trust store here (not Debian/Ubuntu or Fedora/RHEL)"
+      warn "install it by hand — see the steps below"
+    fi
+  else
+    note "not installed on this host automatically — re-run with --trust-ca to do"
+    note "that (needs sudo), or by hand:"
+  fi
+  cat <<EOF
+    # Debian/Ubuntu
+    sudo cp $CA_CRT /usr/local/share/ca-certificates/irabelle-root.crt
+    sudo update-ca-certificates
+
+    # Fedora/RHEL: copy into /etc/pki/ca-trust/source/anchors, then update-ca-trust
+    # macOS:       security add-trusted-cert -d -r trustRoot \\
+    #                -k /Library/Keychains/System.keychain root-ca.crt
+EOF
+  if [ "$CA_TRUSTED_HERE" = yes ]; then
+    note "this only trusts it for tools ON THIS HOST — every client device"
+    note "(phone, laptop, ...) that will browse to a *.$ROOT_TLD name still"
+    note "needs its own one-time step, same as above (or its own equivalent —"
+    note "Android: Settings -> Security -> Encryption & credentials -> Install"
+    note "a certificate; iOS/macOS: AirDrop or email the .crt, then Settings ->"
+    note "General -> VPN & Device Management, then also Settings -> General ->"
+    note "About -> Certificate Trust Settings to fully enable it)."
+  fi
+  note "Firefox keeps its own store regardless of the OS: set"
+  note "security.enterprise_roots.enabled=true in about:config, or import"
+  note "$CA_CRT under Settings -> Privacy & Security -> Certificates."
+fi
+
+TRAEFIK_UP=no
+docker compose -f traefik/compose.yml ps --status running -q 2>/dev/null | grep -q . && TRAEFIK_UP=yes
+
 cat <<EOF
 
 Next, in Dockhand:
   1. Settings -> Authentication: create an admin user.
+EOF
+if [ "$TRAEFIK_UP" = yes ]; then
+  cat <<EOF
+  2. traefik is already running (started by this script) — the
+     https://<service>.$ROOT_TLD names work as soon as a service is deployed
+     and cert-watcher.sh has issued its certificate.
+  3. Deploy the rest whenever you like. New stacks turn up in the list after
+     update.sh runs, ready for you to deploy.
+EOF
+else
+  cat <<EOF
   2. Deploy **traefik** first — every other service is published through it, so
      the https://<service>.$ROOT_TLD names only work once it is up.
   3. Deploy the rest whenever you like. New stacks turn up in the list after
      update.sh runs, ready for you to deploy.
 EOF
+fi
