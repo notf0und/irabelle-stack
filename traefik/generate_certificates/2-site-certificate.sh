@@ -2,8 +2,8 @@
 # 2-site-certificate.sh — issue one leaf certificate for a fully-qualified
 # host, signed by this stack's local root CA.
 #
-#   ./2-site-certificate.sh traefik.test
-#   ./2-site-certificate.sh traefik.test --force
+#   ./2-site-certificate.sh traefik.smart
+#   ./2-site-certificate.sh traefik.smart --force
 #
 # Nothing here knows about the TLD: the caller always passes a full hostname
 # (cert-watcher.sh builds them from whatever Traefik routers are running).

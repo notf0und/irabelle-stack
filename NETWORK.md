@@ -105,7 +105,7 @@ services:
     environment:
       FTLCONF_dns_upstreams: 10.77.40.6        # nothing external
       FTLCONF_dns_listeningMode: all           # gotcha 1
-      FTLCONF_misc_etc_dnsmasq_d: "true"       # so the .test wildcard is read
+      FTLCONF_misc_etc_dnsmasq_d: "true"       # so the .smart wildcard is read
       FTLCONF_webserver_api_password: ${PIHOLE_PASSWORD:?}
     networks:
       app-macvlan:
@@ -123,13 +123,13 @@ networks:
 ```
 
 `adblock/.env` carries `TLD`, `TZ`, `PIHOLE_PASSWORD` and `PIHOLE_IP`, and is
-gitignored. The `.test` wildcard lives in
+gitignored. The `.smart` wildcard lives in
 `adblock/config/pihole/dnsmasq.d/99-irabelle.conf` — the same mechanism the station
 build uses (`etc_dnsmasq_d = true` plus `address=/.domain/ip` files):
 
 ```
-address=/.test/192.168.1.2
-local=/.test/
+address=/.smart/192.168.1.2
+local=/.smart/
 ```
 
 **Both lines are needed.** Since dnsmasq 2.86 an `address=` rule only answers A
@@ -141,8 +141,8 @@ with a 2.9x dnsmasq:
 
 | query | with `local=` | without `local=` |
 | --- | --- | --- |
-| `A foo.test` | 192.168.1.2 | 192.168.1.2 |
-| `TXT foo.test` | NOERROR, no answer (local) | forwarded upstream → timeout |
+| `A foo.smart` | 192.168.1.2 | 192.168.1.2 |
+| `TXT foo.smart` | NOERROR, no answer (local) | forwarded upstream → timeout |
 
 It matters more if the TLD is ever a domain you own, because forwarding leaks
 internal hostnames to the resolver upstream. `--address=… --local=…` is the
@@ -182,7 +182,7 @@ The sibling row is what makes the design work: Pi-hole → Unbound at
 192.168.40.6 never leaves the host, so Unbound needs no bridge of its own.
 
 **`FTLCONF_misc_etc_dnsmasq_d: "true"`** — Pi-hole v6 does not read
-`/etc/dnsmasq.d` unless this is set, and the `.test` wildcard lives there. If
+`/etc/dnsmasq.d` unless this is set, and the `.smart` wildcard lives there. If
 local names stop resolving, check it under Settings → All settings →
 `misc.etc_dnsmasq_d`.
 

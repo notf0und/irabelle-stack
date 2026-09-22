@@ -97,8 +97,12 @@ trap 'rm -rf "$TMP"' EXIT
 
 # --- 1. the .env files -------------------------------------------------------
 # A stack's .env.example is a template: @REPO_DIR@ expands to this checkout's
-# absolute path, which is what the dockhand stack needs for matching paths.
-write_env_from() { sed "s|@REPO_DIR@|$REPO_DIR|g" "$1" >"$2"; }
+# absolute path (what the dockhand stack needs for matching paths), and
+# @TLD@ expands to the root .env's TLD — so a stack's own .env.example only
+# needs to declare TLD once, in the root .env.example, not repeat it.
+# ROOT_TLD is unset on the very first call (creating the root .env itself,
+# whose own .env.example has no @TLD@ to expand), hence the ":-".
+write_env_from() { sed -e "s|@REPO_DIR@|$REPO_DIR|g" -e "s|@TLD@|${ROOT_TLD:-}|g" "$1" >"$2"; }
 
 # In a .env.example, the literal value `change-me` means "generate one on first
 # setup". That way a fresh clone never runs with a published default password,
@@ -154,12 +158,28 @@ for s in "${STACKS[@]}"; do
     continue
   fi
   stack_tld=$(env_tld "$s/.env")
-  if [ -n "$ROOT_TLD" ] && [ "$stack_tld" != "$ROOT_TLD" ]; then
-    warn "$s/.env has TLD=$stack_tld but .env has TLD=$ROOT_TLD"
-    warn "service names will not match — edit one, or delete $s/.env to re-copy"
+  if [ -n "$ROOT_TLD" ] && [ -n "$stack_tld" ] && [ "$stack_tld" != "$ROOT_TLD" ]; then
+    sed -i "s|^[[:space:]]*TLD[[:space:]]*=.*|TLD=$ROOT_TLD|" "$s/.env"
+    note "$s/.env: TLD was $stack_tld, synced to $ROOT_TLD (root .env is the source of truth)"
   fi
 done
 note "stacks found: ${STACKS[*]}"
+
+# adblock's dnsmasq wildcard is a real config file, not a .env — Compose can't
+# interpolate ${TLD} into it, so it's kept in sync here the same way. Only the
+# TLD portion of the address=/local= lines is touched; the LAN address next to
+# it is per-install and left exactly as found.
+DNSMASQ_CONF="adblock/config/pihole/dnsmasq.d/99-irabelle.conf"
+if [ -f "$DNSMASQ_CONF" ] && [ -n "$ROOT_TLD" ]; then
+  CONF_TLD=$(sed -n 's#^address=/\.\([^/]*\)/.*#\1#p' "$DNSMASQ_CONF" | head -n1)
+  if [ -n "$CONF_TLD" ] && [ "$CONF_TLD" != "$ROOT_TLD" ]; then
+    sed -i \
+      -e "s#^address=/\.[^/]*/#address=/.$ROOT_TLD/#" \
+      -e "s#^local=/\.[^/]*/\$#local=/.$ROOT_TLD/#" \
+      "$DNSMASQ_CONF"
+    note "$DNSMASQ_CONF: wildcard was .$CONF_TLD, synced to .$ROOT_TLD"
+  fi
+fi
 
 # Per-install config, kept out of git so a `git pull` can never be blocked by a
 # local edit — the same deal as .env above. Each one ships as a committed

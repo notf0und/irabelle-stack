@@ -27,13 +27,13 @@ API_URL="https://localhost/api/http/routers"
 LOCK_FILE="/tmp/traefik-cert-watcher.lock"
 
 # --- TLD (domain suffix) ----------------------------------------------------
-# Single source of truth: <stack>/.env. Falls back to "test" if unset.
+# Single source of truth: <stack>/.env. Falls back to "smart" if unset.
 if [ -f "$STACK_DIR/.env" ]; then
   TLD=$(sed -n 's/^[[:space:]]*TLD[[:space:]]*=[[:space:]]*//p' "$STACK_DIR/.env" | tail -n 1)
   TLD=${TLD%%#*}
   TLD=$(printf '%s' "$TLD" | tr -d '"' | tr -d "'" | tr -d '[:space:]')
 fi
-TLD=${TLD:-test}
+TLD=${TLD:-smart}
 
 mkdir -p "$(dirname -- "$LOG_FILE")" "$CERT_DIR" 2>/dev/null || true
 

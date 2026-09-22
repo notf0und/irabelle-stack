@@ -3,7 +3,7 @@
 A small self-hosted stack — [Traefik](https://traefik.io) as the HTTPS
 front door and [dockhand](https://github.com/fnsys/dockhand) as the Docker
 dashboard — that publishes services under an internal domain
-(`traefik.test`, `dockhand.test`, ...) with locally-signed certificates.
+(`traefik.smart`, `dockhand.smart`, ...) with locally-signed certificates.
 
 ```
 .
@@ -184,7 +184,7 @@ the stack's **Environment variables** panel:
 
 | Variable | Value |
 | --- | --- |
-| `TLD` | `test` |
+| `TLD` | `smart` |
 | `PIHOLE_PASSWORD` | the Pi-hole admin password |
 | `PIHOLE_IP` | `192.168.40.5` |
 
@@ -257,9 +257,14 @@ one, so a stack with extra variables (or different defaults) is described by its
 own directory and the shared root template stays generic. If a stack has no
 `.env.example`, it inherits the root values as before.
 
-`TLD` is shared by every stack. If a stack's `.env` disagrees with the root
-one, `setup.sh` says so instead of silently deploying services under two
-different domains. To re-copy the template into one stack:
+`TLD` is shared by every stack, and the root `.env` is its only source of
+truth — a stack's own `.env.example` (adblock, dockhand) declares it as
+`TLD=@TLD@`, expanded from the root `.env` when `setup.sh` creates that
+stack's `.env`, rather than repeating a literal value. If a stack's `.env`
+ever drifts from the root one (e.g. hand-edited), `setup.sh` overwrites it to
+match on the next run instead of silently deploying services under two
+different domains — you never need to touch a stack's `.env` for `TLD`
+directly. To re-copy the whole template into one stack:
 
 ```sh
 cp .env traefik/.env     # a stack with its own .env.example takes that instead
@@ -268,49 +273,70 @@ cp .env traefik/.env     # a stack with its own .env.example takes that instead
 ### Renaming the internal domain
 
 This is also how an existing install moves off an earlier default (`local`, then
-`internal`). Edit `TLD` in each stack's `.env` (and in the root `.env` so new
-stacks inherit it):
+`internal`). Edit `TLD` in the root `.env` only, then re-run `setup.sh`:
 
 ```sh
-$EDITOR .env traefik/.env dockhand/.env     # TLD=test
-./setup.sh                                  # re-runs, then pick the stacks again
+$EDITOR .env       # TLD=smart
+./setup.sh         # syncs every stack's .env and the adblock dnsmasq wildcard,
+                    # then pick the stacks again to restart them with it
 ```
 
 The compose labels interpolate `${TLD}` and `cert-watcher.sh` reads `TLD` from
-the stack's `.env`, so nothing else needs editing. Old certificates are left on
-disk on purpose; to retire the previous names:
+the stack's `.env`, both already synced by the step above. `setup.sh` also
+rewrites the TLD portion of `adblock/config/pihole/dnsmasq.d/99-irabelle.conf`'s
+`address=`/`local=` lines in place, leaving the LAN address next to it
+untouched — that file can't read `${TLD}` itself, since Compose only
+interpolates variables inside `compose.yml`, not arbitrary mounted files.
+Nothing else needs editing. Old certificates are left on disk on purpose; to
+retire the previous names:
 
 ```sh
 rm traefik/config/certificates/<old-host>.crt traefik/config/certificates/<old-host>.key
 traefik/generate_certificates/3-sync-tls-file.sh
 ```
 
-### Why `.test`
+### Why `.smart`
 
-`test` is the shortest namespace that needs no client-side configuration:
+Chromium and Firefox both decide whether typed text navigates or searches by
+checking the TLD against two lists: a handful of RFC-reserved names hardcoded
+into the browser (`test`, `example`, `internal`, `local`, plus `invalid` and
+`localhost` on Firefox), and the **Public Suffix List / current ICANN root
+zone** — i.e. every TLD that is actually delegated today, the same way
+`.com` or `.org` are recognized. Outside both lists, a typed host like
+`foo.lan` or `foo.ira` gets no "visit" candidate generated at all on Android
+Chrome (confirmed directly via `chrome://omnibox`'s debug export during setup)
+— it's pure search, every time, on every device, with no workaround short of
+always typing a scheme or trailing slash.
 
-* It is reserved by [RFC 2606](https://www.rfc-editor.org/rfc/rfc2606) and
-  [RFC 6761](https://www.rfc-editor.org/rfc/rfc6761), so it can never be
-  delegated and collide with a real domain.
-* Browsers have recognized it as a URL for years — Chromium hardcodes `test` in
-  its omnibox fixup and Firefox ships
-  `browser.fixup.domainsuffixwhitelist.test=true` — so `traefik.test` typed
-  without a scheme navigates instead of going to a search engine.
+`smart` is not on the reserved list, but it *is* a delegated TLD: BMW's `.mini`
+and Dell's `.dell` work the same way for the same reason. This can be checked
+directly against IANA's published root zone list
+(`https://data.iana.org/TLD/tlds-alpha-by-domain.txt`) for any candidate
+before relying on it.
 
-The cost is the name itself: a `.test` domain reads as a test fixture in logs
-and certificates. `.internal` is the same mechanism with a more deliberate ring,
-but its browser whitelist entries are newer (2024+), so old, un-updated browsers
-may still search for it. `home.arpa`
-([RFC 8375](https://www.rfc-editor.org/rfc/rfc8375)) is longer but sits in the
-Public Suffix List, so it also works on clients that hardcode nothing — Firefox
-for Android, Safari and other PSL-aware tools.
+**The trade-off, confirmed by live lookup, not assumed:** `.smart` is the
+real production TLD of Smart Communications, a Philippine telecom — it is not
+dormant. `dig shop.smart` resolves to a live server today, and
+`account.smart` / `my.smart` delegate to Smart Communications' own real
+nameservers. Locally this is a non-issue: `adblock/config/pihole/dnsmasq.d/99-irabelle.conf`'s
+`address=`/`local=` wildcard answers every query under `.smart` before it
+leaves the LAN, for any device using this network's resolver. The exposure is
+narrower and specific: a device that bypasses that resolver — off this
+network, on mobile data, or with secure DNS/DoH pointed at a public
+resolver — resolves `.smart` names for real, so a service name that happens
+to match something Smart Communications actually runs (`shop`, `account`,
+`my`, and likely other customer-portal-shaped words) would reach their real
+server instead of failing safely. Service names here (`traefik`, `dockhand`,
+`pihole`) don't collide with anything found by live lookup at setup time, but
+a new service name should be checked the same way before adding it.
 
-Avoid `.local` (reserved for multicast DNS,
-[RFC 6762](https://www.rfc-editor.org/rfc/rfc6762): phones, macOS and Windows
-hand `*.local` to mDNS and ignore the unicast DNS answer) and `.lan` or made-up
-names like `.ira`, which are neither special-use nor in either browser's fixup
-list, so typing `service.lan` with no scheme searches for it instead of
-navigating.
+There is no dormant, collision-free option this short: `home.arpa`
+([RFC 8375](https://www.rfc-editor.org/rfc/rfc8375)) is the only alternative
+with a real collision-proof guarantee (PSL-listed, works with zero
+configuration everywhere, including Firefox for Android and Safari), at the
+cost of being much longer to type. `.test` is the only *hardcoded* option
+short enough to compete, at the cost of reading like a test fixture in logs
+and certificates.
 
 See [Name resolution](#name-resolution) for the DNS side.
 
@@ -324,8 +350,8 @@ without touching DNS again.
 Point your local resolver at this host. With **Pi-hole** (dnsmasq), add:
 
 ```
-address=/test/192.168.1.2
-local=/test/
+address=/smart/192.168.1.2
+local=/smart/
 ```
 
 `192.168.1.2` is this host's LAN address. `address=` answers A queries with that
@@ -342,35 +368,35 @@ Where the lines go depends on the Pi-hole version:
 
   ```sh
   sudo pihole-FTL --config misc.dnsmasq_lines \
-    '["address=/test/192.168.1.2","local=/test/"]'
+    '["address=/smart/192.168.1.2","local=/smart/"]'
   ```
 
   The `/etc/dnsmasq.d/` directory is *not* read unless `misc.etc_dnsmasq_d` is
   set to `true` — and don't enable both at once, as the two sets of lines can
   conflict.
-* **v5** — a file in `/etc/dnsmasq.d/`, e.g. `/etc/dnsmasq.d/05-test.conf`.
+* **v5** — a file in `/etc/dnsmasq.d/`, e.g. `/etc/dnsmasq.d/05-smart.conf`.
 
 The **Local DNS Records** page can't do this: it only adds exact A/AAAA records,
 so a wildcard there means one entry per service. Saving `misc.dnsmasq_lines`
 restarts FTL for you; on v5 run `pihole restartdns`. Then check it:
 
 ```sh
-dig +short dockhand.test @192.168.1.2   # → 192.168.1.2
-dig AAAA    dockhand.test @192.168.1.2  # → NODATA (NOERROR, empty) — not forwarded
+dig +short dockhand.smart @192.168.1.2   # → 192.168.1.2
+dig AAAA    dockhand.smart @192.168.1.2  # → NODATA (NOERROR, empty) — not forwarded
 ```
 
 Any dnsmasq behaves the same way, so a router running OpenWrt/DNSMasq can serve
 the zone with the same two lines:
 
 ```sh
-uci add_list dhcp.@dnsmasq[0].address='/test/192.168.1.2'
-uci add_list dhcp.@dnsmasq[0].local='/test/'
+uci add_list dhcp.@dnsmasq[0].address='/smart/192.168.1.2'
+uci add_list dhcp.@dnsmasq[0].local='/smart/'
 uci commit dhcp && /etc/init.d/dnsmasq restart
 ```
 
 Failing that, per-client `/etc/hosts` entries work for individual names. Note
 that clients which ignore your resolver — hardcoded DNS, Android Private DNS, or
-a browser with secure DNS/DoH enabled — will not resolve `*.test`.
+a browser with secure DNS/DoH enabled — will not resolve `*.smart`.
 
 ## Host networking
 

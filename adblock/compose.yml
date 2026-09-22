@@ -56,7 +56,7 @@ services:
       # Default is "local", which refuses queries from other subnets. LAN
       # clients are on 192.168.1.x asking 192.168.40.5, so this is required.
       FTLCONF_dns_listeningMode: all
-      # Pi-hole v6 only reads /etc/dnsmasq.d when this is on; the .test
+      # Pi-hole v6 only reads /etc/dnsmasq.d when this is on; the .smart
       # wildcard below lives there. Verified against the station build, which
       # sets etc_dnsmasq_d = true for exactly this reason.
       FTLCONF_misc_etc_dnsmasq_d: "true"
