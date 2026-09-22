@@ -71,10 +71,16 @@ work Dockhand cannot do for itself:
    that instead, so it can carry extra variables);
 2. create the shared `app-bridge` network Dockhand attaches to;
 3. generate the root CA behind the `*.$TLD` certificates;
-4. start **Dockhand** and print the URL to open — as a clickable hyperlink, so
+4. start **traefik**, and any other stack whose networks are already in
+   place — a stack needing `app-macvlan` (adblock) only starts once
+   `host-vlan.sh` has already created it, otherwise it's left for you to
+   deploy once that's done. This is what makes `https://<service>.<TLD>`
+   work right after this script finishes rather than only after a manual
+   deploy;
+5. start **Dockhand** and print the URL to open — as a clickable hyperlink, so
    it works over SSH; it only tries to launch a browser itself when the host
    has a display to draw on;
-5. give Dockhand the things that are not in git — a local environment named
+6. give Dockhand the things that are not in git — a local environment named
    **Irabelle** (timezone from `.env`'s `TZ`, scheduled update checks,
    automatic image pruning and version-tag checks all on), and this checkout
    as an external stack path — so a fresh clone is usable without clicking
@@ -83,9 +89,8 @@ work Dockhand cannot do for itself:
    change afterward in Dockhand's UI, the same way an existing `.env` is left
    alone.
 
-It does **not** start any other stack. From there you deploy what you want in
-Dockhand — `traefik` first, since every other service is published through it,
-so the `https://<service>.<TLD>` names only work once it is running.
+Any stack added later than these two is still deployed by hand, from
+Dockhand's UI.
 
 Because Dockhand's own `dockhand.<TLD>` name needs Traefik, its port is
 published directly (`DOCKHAND_PORT`, default 3000) — that URL is the

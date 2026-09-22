@@ -6,14 +6,18 @@
 #                           the two cron jobs
 #   ./setup.sh --no-cron    do not install the cron jobs
 #
-# From here on, stacks are deployed from Dockhand's UI — setup.sh starts no
-# stack but Dockhand itself. What it does first is only the work Dockhand
-# cannot do for itself:
+# Any stack added later is still deployed from Dockhand's UI — setup.sh only
+# auto-starts what it can start safely (see step 4 below). What it does first
+# is only the work Dockhand cannot do for itself:
 #
 #   1. the .env files the stacks read (gitignored, so never in the repo)
 #   2. the shared app-bridge network Dockhand attaches to
 #   3. the root CA behind the *.$TLD certificates
-#   4. Dockhand, on a directly reachable port
+#   4. traefik, and any other stack whose network dependencies are already
+#      met (adblock, once host-vlan.sh has run) — so https://<service>.$TLD
+#      already works once this script finishes, not only after a manual
+#      deploy
+#   5. Dockhand, on a directly reachable port
 #
 # Deploying by hand is still just compose, if you would rather:
 #   docker compose -f traefik/compose.yml up -d
@@ -325,7 +329,30 @@ if find "$REPO_DIR" -path "$REPO_DIR/.git" -prune -o -user root -print -quit 2>/
   warn "clear them once with: sudo chown -R $(id -un) '$REPO_DIR'"
 fi
 
-# --- 4. Dockhand -------------------------------------------------------------
+# --- 4. traefik, and any other stack whose networks are ready ---------------
+# Traefik has no macvlan dependency, so it always starts here — that's what
+# makes https://<service>.$TLD work right after this script finishes instead
+# of only after a manual deploy in Dockhand. A stack that needs app-macvlan
+# (adblock) only starts if host-vlan.sh already created it, matching the
+# check above — sudo is never something this script does on your behalf, so a
+# stack that isn't ready yet is skipped, not forced. dockhand is excluded: it
+# has its own dedicated start, health check and baseline configuration below.
+say "Starting traefik and any VLAN-ready stack"
+for s in "${STACKS[@]}"; do
+  [ "$s" = "dockhand" ] && continue
+  if grep -q 'driver:[[:space:]]*macvlan' "$s/compose.yml" 2>/dev/null \
+     && ! docker network inspect app-macvlan >/dev/null 2>&1; then
+    note "$s: skipped — needs the host VLAN (see warning above)"
+    continue
+  fi
+  if ( cd "$s" && docker compose up -d ); then
+    note "$s started"
+  else
+    warn "$s failed to start — check: docker compose -f $s/compose.yml logs"
+  fi
+done
+
+# --- 5. Dockhand -------------------------------------------------------------
 say "Dockhand"
 # --force-recreate because a re-cloned checkout is a *new* directory: a running
 # container keeps the old mount, which now points at a deleted inode, so it
