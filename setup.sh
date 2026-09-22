@@ -5,9 +5,10 @@
 #   ./setup.sh              prepare, start Dockhand, print its URL, and install
 #                           the two cron jobs
 #   ./setup.sh --no-cron    do not install the cron jobs
-#   ./setup.sh --trust-ca   also install the root CA into this host's own
-#                           trust store (sudo; every client device still
-#                           needs its own one-time step regardless)
+#   ./setup.sh --no-trust-ca  skip installing the root CA into this host's
+#                             own trust store (done by default; sudo — every
+#                             client device still needs its own one-time step
+#                             regardless)
 #
 # Any stack added later is still deployed from Dockhand's UI — setup.sh only
 # auto-starts what it can start safely (see step 4 below). What it does first
@@ -32,20 +33,20 @@ cd "$REPO_DIR"
 
 DOCKHAND_PORT=${DOCKHAND_PORT:-3000}
 CRON_MODE=yes
-TRUST_CA=no
+TRUST_CA=yes
 
 usage() {
   cat <<'EOF'
 Usage: ./setup.sh [options]
 
-  --no-cron     do not install the cron jobs
-  --cron        (default) install them
-  --trust-ca    also install the root CA into this host's own trust store
-                (needs sudo; never done without this flag). This only
-                affects the host itself — every *client* device (phone,
-                laptop, ...) still needs the one-time manual step printed
-                at the end, regardless of this flag.
-  -h, --help    this text
+  --no-cron       do not install the cron jobs
+  --cron          (default) install them
+  --no-trust-ca   do not install the root CA into this host's own trust store
+  --trust-ca      (default) install it (needs sudo). This only affects the
+                  host itself — every *client* device (phone, laptop, ...)
+                  still needs the one-time manual step printed at the end,
+                  regardless of this flag.
+  -h, --help      this text
 
 Environment:
   DOCKHAND_PORT           host port for Dockhand (default 3000)
@@ -59,6 +60,7 @@ while [ $# -gt 0 ]; do
     --cron) CRON_MODE=yes ;;
     --no-cron) CRON_MODE=no ;;
     --trust-ca) TRUST_CA=yes ;;
+    --no-trust-ca) TRUST_CA=no ;;
     -h|--help) usage 0 ;;
     *) echo "Unknown option: $1" >&2; usage 2 ;;
   esac
@@ -568,14 +570,24 @@ AUTH_CODE=$(curl -s -o /dev/null -w '%{http_code}' -m 5 \
 say "Dockhand is up — open one of these"
 # `ip -o` gives: "2: enp1s0    inet 192.168.1.2/24 brd ..." — dev is field 2,
 # the address is field 4.
-URLS=()
+IP_URLS=()
 while read -r _ dev _ cidr _; do
   case "$dev" in lo|docker*|br-*|veth*) continue ;; esac
-  URLS+=("http://${cidr%%/*}:$DOCKHAND_PORT")
+  IP_URLS+=("http://${cidr%%/*}:$DOCKHAND_PORT")
 done < <(ip -4 -o addr show scope global 2>/dev/null)
 
+# The real name goes first — clicking its OSC 8 hyperlink is what actually
+# opens it in *your* browser over SSH: the terminal you're reading this in
+# handles that client-side, which is the only way this can work at all, since
+# nothing running on the server can reach into a remote desktop on its own.
+# It needs DNS pointed at this LAN's resolver and the root CA trusted first
+# (see "Root CA" above) — the ip:port fallbacks below need neither.
+URLS=()
+[ -n "$ROOT_TLD" ] && URLS+=("https://dockhand.$ROOT_TLD")
+URLS+=("${IP_URLS[@]}")
+
 for url in "${URLS[@]}"; do print_url "$url"; done
-open_first_url "${URLS[0]:-}"
+open_first_url "${IP_URLS[0]:-}"
 
 if [ "$AUTH_CODE" = 200 ]; then
   warn "authentication is OFF: anyone who can reach that URL can control Docker"
@@ -610,8 +622,7 @@ if [ -f "$CA_CRT" ]; then
       warn "install it by hand — see the steps below"
     fi
   else
-    note "not installed on this host automatically — re-run with --trust-ca to do"
-    note "that (needs sudo), or by hand:"
+    note "skipped (--no-trust-ca) — install it by hand:"
   fi
   cat <<EOF
     # Debian/Ubuntu
