@@ -74,9 +74,14 @@ work Dockhand cannot do for itself:
 4. start **Dockhand** and print the URL to open — as a clickable hyperlink, so
    it works over SSH; it only tries to launch a browser itself when the host
    has a display to draw on;
-5. give Dockhand the two things that are not in git — the local environment it
-   needs, and this checkout as an external stack path — so a fresh clone is
-   usable without clicking through onboarding.
+5. give Dockhand the things that are not in git — a local environment named
+   **Irabelle** (timezone from `.env`'s `TZ`, scheduled update checks,
+   automatic image pruning and version-tag checks all on), and this checkout
+   as an external stack path — so a fresh clone is usable without clicking
+   through onboarding. This baseline is applied once, only when Dockhand's own
+   database is empty (a fresh install); it never overwrites a setting you
+   change afterward in Dockhand's UI, the same way an existing `.env` is left
+   alone.
 
 It does **not** start any other stack. From there you deploy what you want in
 Dockhand — `traefik` first, since every other service is published through it,

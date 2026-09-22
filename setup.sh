@@ -126,6 +126,17 @@ env_tld() {
   printf '%s' "$v" | tr -d '"' | tr -d "'" | tr -d '[:space:]'
 }
 
+# Same idea as env_tld, generalized to any KEY=value line — used below to read
+# TZ out of the root .env so Dockhand's baseline timezone has one source of
+# truth too, instead of a second hardcoded default drifting from it.
+env_var() {
+  [ -f "$1" ] || return 0
+  local v
+  v=$(sed -n "s/^[[:space:]]*$2[[:space:]]*=[[:space:]]*//p" "$1" | tail -n 1)
+  v=${v%%#*}
+  printf '%s' "$v" | tr -d '"' | tr -d "'" | tr -d '[:space:]'
+}
+
 STACKS=()
 for d in */; do
   d=${d%/}
@@ -362,11 +373,47 @@ if [ "$any" = 1 ]; then
 try: print(len(json.load(open(sys.argv[1]))))
 except Exception: print(0)' "$TMP/envs.json")
     if [ "$ENV_COUNT" = 0 ]; then
-      ENV_NAME=${DOCKHAND_ENV_NAME:-local}
+      ENV_NAME=${DOCKHAND_ENV_NAME:-Irabelle}
+      ENV_TZ=$(env_var .env TZ)
       if api POST /api/environments \
            "{\"name\":\"$ENV_NAME\",\"connectionType\":\"socket\",\"socketPath\":\"/var/run/docker.sock\"}" \
-           >/dev/null 2>&1; then
+           >"$TMP/env.json" 2>/dev/null; then
         note "created the '$ENV_NAME' environment (local Docker socket)"
+        ENV_ID=$(python3 -c 'import json,sys
+try: print(json.load(open(sys.argv[1]))["id"])
+except Exception: pass' "$TMP/env.json" 2>/dev/null || true)
+        if [ -n "$ENV_ID" ]; then
+          # These are this install's defaults, applied once at first bootstrap
+          # only — a later change made in Dockhand's own UI is never overridden
+          # by re-running setup.sh, the same as an existing .env is left alone.
+          if [ -n "$ENV_TZ" ]; then
+            api POST "/api/environments/$ENV_ID/timezone" \
+              "{\"timezone\":\"$ENV_TZ\"}" >/dev/null 2>&1 \
+              && note "  timezone: $ENV_TZ" \
+              || warn "  could not set the environment timezone"
+          fi
+          api POST "/api/environments/$ENV_ID/update-check" \
+            '{"enabled":true,"cron":"0 4 * * *","autoUpdate":false,"vulnerabilityCriteria":"never"}' \
+            >/dev/null 2>&1 \
+            && note "  scheduled update checks: on" \
+            || warn "  could not enable scheduled update checks"
+          api POST "/api/environments/$ENV_ID/image-prune" \
+            '{"enabled":true,"cronExpression":"0 3 * * 0","pruneMode":"dangling"}' \
+            >/dev/null 2>&1 \
+            && note "  automatic image pruning: on" \
+            || warn "  could not enable automatic image pruning"
+          api POST /api/settings/semver \
+            '{"enabled":true,"maxBump":"major","matchFlavor":true,"includePrerelease":false}' \
+            >/dev/null 2>&1 \
+            && note "  check for newer version tags: on" \
+            || warn "  could not enable version-tag checks"
+          if [ -n "$ENV_TZ" ]; then
+            api POST /api/settings/general \
+              "{\"defaultTimezone\":\"$ENV_TZ\"}" >/dev/null 2>&1 \
+              && note "  default scheduling timezone: $ENV_TZ" \
+              || warn "  could not set the default scheduling timezone"
+          fi
+        fi
       else
         warn "could not create an environment — add one in Dockhand: Settings -> Environments"
       fi
