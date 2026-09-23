@@ -851,7 +851,7 @@ json.dump({
     if [ -n "$OIDC_ID" ]; then
       printf '    waiting for authentik'
       for _ in $(seq 1 36); do
-        [ "$(docker inspect -f '{{.State.Health.Status}}' authentik-server 2>/dev/null)" = healthy ] && break
+        [ "$(docker inspect -f '{{.State.Health.Status}}' authentik 2>/dev/null)" = healthy ] && break
         printf '.'
         sleep 5
       done

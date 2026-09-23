@@ -144,7 +144,7 @@ entries:
     attrs:
       order: 0
 
-  # The embedded outpost runs inside authentik-server and is what answers the
+  # The embedded outpost runs inside the authentik container and is what answers the
   # middleware. It only serves the providers listed here, so every
   # forward-auth provider above must be added to this list too.
   - model: authentik_outposts.outpost
