@@ -77,19 +77,30 @@ work Dockhand cannot do for itself:
    deploy once that's done. This is what makes `https://<service>.<TLD>`
    work right after this script finishes rather than only after a manual
    deploy;
-5. start **Dockhand** and print the URL to open — as a clickable hyperlink, so
-   it works over SSH; it only tries to launch a browser itself when the host
-   has a display to draw on;
+5. start **Dockhand**;
 6. give Dockhand the things that are not in git — a local environment named
-   **Irabelle** (timezone from `.env`'s `TZ`, scheduled update checks,
-   automatic image pruning and version-tag checks all on), and this checkout
-   as an external stack path — so a fresh clone is usable without clicking
-   through onboarding. This baseline is applied once, only when Dockhand's own
-   database is empty (a fresh install); it never overwrites a setting you
-   change afterward in Dockhand's UI, the same way an existing `.env` is left
-   alone.
+   **Irabelle** (timezone from `.env`'s `TZ`, scheduled updates applied
+   automatically, automatic image pruning, version-tag checks and selfh.st
+   icons all on), and this checkout as an external stack path — so a fresh
+   clone is usable without clicking through onboarding. This baseline is
+   applied once, only when Dockhand's own database is empty (a fresh
+   install); it never overwrites a setting you change afterward in
+   Dockhand's UI, the same way an existing `.env` is left alone;
+7. trust the root CA on this host itself (`sudo`; skip with `--no-trust-ca`)
+   — every *client* device (phone, laptop, ...) still needs its own one-time
+   step regardless, printed at the end alongside the CA's path;
+8. if `~/manual-dns.sh` exists and shows a manual override active (this
+   repo's own bootstrapping-before-Pi-hole-exists escape hatch, not
+   something every install has), hand this host's DNS back to whatever the
+   router now provides — safe to skip if adblock isn't actually running yet;
+9. print the URLs to open last, as clickable hyperlinks — `https://dockhand.<TLD>`
+   first, `ip:port` fallbacks after — so it works over SSH: clicking a
+   hyperlink opens it in the browser on *your* machine, which is the only way
+   this can work at all over a plain SSH session, since nothing running on
+   the server can reach into a remote desktop on its own. It only tries to
+   launch a browser itself when the host has a display to draw on.
 
-Any stack added later than these two is still deployed by hand, from
+Any stack added later than the two above is still deployed by hand, from
 Dockhand's UI.
 
 Because Dockhand's own `dockhand.<TLD>` name needs Traefik, its port is

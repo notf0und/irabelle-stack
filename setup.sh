@@ -21,7 +21,15 @@
 #      met (adblock, once host-vlan.sh has run) — so https://<service>.$TLD
 #      already works once this script finishes, not only after a manual
 #      deploy
-#   5. Dockhand, on a directly reachable port
+#   5. Dockhand, on a directly reachable port, with a baseline configuration
+#      (timezone, update/prune/version-check settings) applied once
+#   6. trust the root CA on this host (see --no-trust-ca above)
+#   7. hand this host's DNS back to the router if ~/manual-dns.sh shows a
+#      manual override active and adblock is actually running (not every
+#      install has this script — it's this bootstrapping problem's own
+#      escape hatch, see the block near the end of this file)
+#
+# The URLs to open are printed last, not step 5 — see the end of this file.
 #
 # Deploying by hand is still just compose, if you would rather:
 #   docker compose -f traefik/compose.yml up -d
@@ -432,10 +440,10 @@ except Exception: pass' "$TMP/env.json" 2>/dev/null || true)
               || warn "  could not set the environment timezone"
           fi
           api POST "/api/environments/$ENV_ID/update-check" \
-            '{"enabled":true,"cron":"0 4 * * *","autoUpdate":false,"vulnerabilityCriteria":"never"}' \
+            '{"enabled":true,"cron":"0 4 * * *","autoUpdate":true,"vulnerabilityCriteria":"never"}' \
             >/dev/null 2>&1 \
-            && note "  scheduled update checks: on" \
-            || warn "  could not enable scheduled update checks"
+            && note "  scheduled updates: on, applied automatically" \
+            || warn "  could not enable scheduled updates"
           api POST "/api/environments/$ENV_ID/image-prune" \
             '{"enabled":true,"cronExpression":"0 3 * * 0","pruneMode":"dangling"}' \
             >/dev/null 2>&1 \
@@ -446,12 +454,15 @@ except Exception: pass' "$TMP/env.json" 2>/dev/null || true)
             >/dev/null 2>&1 \
             && note "  check for newer version tags: on" \
             || warn "  could not enable version-tag checks"
-          if [ -n "$ENV_TZ" ]; then
-            api POST /api/settings/general \
-              "{\"defaultTimezone\":\"$ENV_TZ\"}" >/dev/null 2>&1 \
-              && note "  default scheduling timezone: $ENV_TZ" \
-              || warn "  could not set the default scheduling timezone"
-          fi
+          # useSelfhstIcons is not true by default on a fresh Dockhand install
+          # (confirmed on an actual from-scratch run), so it needs setting
+          # explicitly, not just defaultTimezone.
+          GENERAL_BODY='{"useSelfhstIcons":true'
+          [ -n "$ENV_TZ" ] && GENERAL_BODY="$GENERAL_BODY,\"defaultTimezone\":\"$ENV_TZ\""
+          GENERAL_BODY="$GENERAL_BODY}"
+          api POST /api/settings/general "$GENERAL_BODY" >/dev/null 2>&1 \
+            && note "  selfh.st icons: on${ENV_TZ:+; default scheduling timezone: $ENV_TZ}" \
+            || warn "  could not update general settings"
         fi
       else
         warn "could not create an environment — add one in Dockhand: Settings -> Environments"
@@ -567,33 +578,6 @@ fi
 AUTH_CODE=$(curl -s -o /dev/null -w '%{http_code}' -m 5 \
   "http://127.0.0.1:$DOCKHAND_PORT/api/environments" 2>/dev/null || true)
 
-say "Dockhand is up — open one of these"
-# `ip -o` gives: "2: enp1s0    inet 192.168.1.2/24 brd ..." — dev is field 2,
-# the address is field 4.
-IP_URLS=()
-while read -r _ dev _ cidr _; do
-  case "$dev" in lo|docker*|br-*|veth*) continue ;; esac
-  IP_URLS+=("http://${cidr%%/*}:$DOCKHAND_PORT")
-done < <(ip -4 -o addr show scope global 2>/dev/null)
-
-# The real name goes first — clicking its OSC 8 hyperlink is what actually
-# opens it in *your* browser over SSH: the terminal you're reading this in
-# handles that client-side, which is the only way this can work at all, since
-# nothing running on the server can reach into a remote desktop on its own.
-# It needs DNS pointed at this LAN's resolver and the root CA trusted first
-# (see "Root CA" above) — the ip:port fallbacks below need neither.
-URLS=()
-[ -n "$ROOT_TLD" ] && URLS+=("https://dockhand.$ROOT_TLD")
-URLS+=("${IP_URLS[@]}")
-
-for url in "${URLS[@]}"; do print_url "$url"; done
-open_first_url "${IP_URLS[0]:-}"
-
-if [ "$AUTH_CODE" = 200 ]; then
-  warn "authentication is OFF: anyone who can reach that URL can control Docker"
-  warn "on this host. Turn it on in Dockhand: Settings -> Authentication."
-fi
-
 # --- trust the root CA --------------------------------------------------------
 CA_CRT="$REPO_DIR/traefik/generate_certificates/root-certificates/root-ca.crt"
 if [ -f "$CA_CRT" ]; then
@@ -647,8 +631,42 @@ EOF
   note "$CA_CRT under Settings -> Privacy & Security -> Certificates."
 fi
 
+# --- hand the host's DNS back to the router ----------------------------------
+# Bootstrapping a cold host needs *some* DNS before Pi-hole is up at all — the
+# git clone and docker pull this repo itself needs. manual-dns.sh (kept in the
+# home directory on purpose, outside this checkout) is this host's way around
+# that chicken-and-egg. Once adblock is actually running, hand the override
+# back: left in place, this host would keep ignoring the router's real
+# (Pi-hole) DNS from here on instead of going back to it as the router hands
+# it out over DHCP. The router's own config is not this repo's responsibility
+# — only whether *this host* still has a manual override active is.
+MANUAL_DNS="$HOME/manual-dns.sh"
+if [ -x "$MANUAL_DNS" ]; then
+  ADBLOCK_UP=no
+  [ -n "$(docker compose -f adblock/compose.yml ps --status running -q 2>/dev/null)" ] && ADBLOCK_UP=yes
+  # Captured first, matched second — not piped straight into `grep -q`. Under
+  # pipefail (set at the top of this script), `grep -q` exiting the instant it
+  # finds a match can SIGPIPE a still-writing upstream command (manual-dns.sh
+  # prints several more lines after the one this matches on), which then makes
+  # the whole pipeline look like it failed even though the match happened.
+  # Hit exactly that here during testing: this check silently never fired.
+  MANUAL_DNS_STATUS=$("$MANUAL_DNS" status 2>/dev/null || true)
+  DNS_OVERRIDDEN=no
+  case "$MANUAL_DNS_STATUS" in *8.8.8.8*) DNS_OVERRIDDEN=yes ;; esac
+  if [ "$ADBLOCK_UP" = yes ] && [ "$DNS_OVERRIDDEN" = yes ]; then
+    say "Manual DNS override"
+    note "pihole is up — handing this host's resolver back to whatever the"
+    note "router provides over DHCP (pihole, per the router's own config):"
+    if "$MANUAL_DNS" off; then
+      note "reverted"
+    else
+      warn "could not revert automatically — run it yourself: $MANUAL_DNS off"
+    fi
+  fi
+fi
+
 TRAEFIK_UP=no
-docker compose -f traefik/compose.yml ps --status running -q 2>/dev/null | grep -q . && TRAEFIK_UP=yes
+[ -n "$(docker compose -f traefik/compose.yml ps --status running -q 2>/dev/null)" ] && TRAEFIK_UP=yes
 
 cat <<EOF
 
@@ -671,3 +689,32 @@ else
      update.sh runs, ready for you to deploy.
 EOF
 fi
+
+if [ "$AUTH_CODE" = 200 ]; then
+  warn "authentication is OFF: anyone who can reach that URL can control Docker"
+  warn "on this host. Turn it on in Dockhand: Settings -> Authentication."
+fi
+
+# This is the last thing printed on purpose — the actual "click this" moment,
+# so it is not something you have to scroll back up for.
+say "Dockhand is up — open one of these"
+# `ip -o` gives: "2: enp1s0    inet 192.168.1.2/24 brd ..." — dev is field 2,
+# the address is field 4.
+IP_URLS=()
+while read -r _ dev _ cidr _; do
+  case "$dev" in lo|docker*|br-*|veth*) continue ;; esac
+  IP_URLS+=("http://${cidr%%/*}:$DOCKHAND_PORT")
+done < <(ip -4 -o addr show scope global 2>/dev/null)
+
+# The real name goes first — clicking its OSC 8 hyperlink is what actually
+# opens it in *your* browser over SSH: the terminal you're reading this in
+# handles that client-side, which is the only way this can work at all, since
+# nothing running on the server can reach into a remote desktop on its own.
+# It needs DNS pointed at this LAN's resolver and the root CA trusted first
+# (see "Root CA" above) — the ip:port fallbacks below need neither.
+URLS=()
+[ -n "$ROOT_TLD" ] && URLS+=("https://dockhand.$ROOT_TLD")
+URLS+=("${IP_URLS[@]}")
+
+for url in "${URLS[@]}"; do print_url "$url"; done
+open_first_url "${IP_URLS[0]:-}"
