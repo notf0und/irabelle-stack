@@ -44,7 +44,6 @@ services:
       - "plex:host-gateway"
     volumes:
       - /etc/localtime:/etc/localtime:ro
-      - /etc/timezone:/etc/timezone:ro
       - ../traefik/generate_certificates/root-certificates/root-ca.crt:/usr/local/share/ca-certificates/root-ca.crt:ro
       - ./config/bazarr:/config
       - ../downloads:/data/downloads
@@ -82,7 +81,6 @@ services:
       TZ: ${TZ:-Pacific/Auckland}
     volumes:
       - /etc/localtime:/etc/localtime:ro
-      - /etc/timezone:/etc/timezone:ro
     networks:
       - app-bridge
     labels:
@@ -121,7 +119,6 @@ services:
       SSL_CERT_FILE: /certificates/ca-bundle.crt
     volumes:
       - /etc/localtime:/etc/localtime:ro
-      - /etc/timezone:/etc/timezone:ro
       - ./config/cleanuparr:/config
       - ../downloads:/data/downloads
       - ../traefik/generate_certificates/root-certificates:/certificates:ro
@@ -168,7 +165,6 @@ services:
       DB_PASSWORD: ${LINGARR_DB_PASSWORD:?LINGARR_DB_PASSWORD is unset - run ./setup.sh, or set it in arr/.env}
     volumes:
       - /etc/localtime:/etc/localtime:ro
-      - /etc/timezone:/etc/timezone:ro
       - ./config/lingarr:/app/config
       - ../downloads:/data/downloads
     networks:
@@ -238,7 +234,6 @@ services:
     dns_search: .
     volumes:
       - /etc/localtime:/etc/localtime:ro
-      - /etc/timezone:/etc/timezone:ro
       - ./config/prowlarr:/config
     networks:
       - app-bridge
@@ -279,7 +274,6 @@ services:
     dns_search: .
     volumes:
       - /etc/localtime:/etc/localtime:ro
-      - /etc/timezone:/etc/timezone:ro
       - ./config/radarr:/config
       - ../downloads:/data/downloads
     networks:
@@ -321,7 +315,6 @@ services:
     dns_search: .
     volumes:
       - /etc/localtime:/etc/localtime:ro
-      - /etc/timezone:/etc/timezone:ro
       - ./config/sonarr:/config
       - ../downloads:/data/downloads
     networks:
@@ -357,7 +350,6 @@ services:
       PGID: ${PGID:-1000}
     volumes:
       - /etc/localtime:/etc/localtime:ro
-      - /etc/timezone:/etc/timezone:ro
       - ./config/transmission:/config
       # The whole tree, at the same path as everywhere else, so a finished
       # torrent can be hardlinked into a library instead of copied.

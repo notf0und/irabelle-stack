@@ -33,7 +33,6 @@ services:
       SEARXNG_SECRET: ${SEARXNG_SECRET:?SEARXNG_SECRET is unset - set it in searxng/.env (see .env.example) or in the Dockhand stack environment panel}
     volumes:
       - /etc/localtime:/etc/localtime:ro
-      - /etc/timezone:/etc/timezone:ro
       # The whole /etc/searxng directory, so the limiter's generated files and any
       # extra config sit next to settings.yml.
       - ./config/searxng/config:/etc/searxng
@@ -81,7 +80,6 @@ services:
     command: valkey-server --save 30 1 --loglevel warning
     volumes:
       - /etc/localtime:/etc/localtime:ro
-      - /etc/timezone:/etc/timezone:ro
       - ./config/searxng/data:/data
     networks:
       - app-bridge

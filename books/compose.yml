@@ -46,7 +46,6 @@ services:
       - 8081:8081
     volumes:
       - /etc/localtime:/etc/localtime:ro
-      - /etc/timezone:/etc/timezone:ro
       - ./config/calibre:/config
       - ../downloads/books:/config/Calibre Library
     networks:
@@ -84,7 +83,6 @@ services:
       - app-bridge
     volumes:
       - /etc/localtime:/etc/localtime:ro
-      - /etc/timezone:/etc/timezone:ro
       - ./config/calibre-web-automated:/config
       # Ingest, not library: anything placed here is imported and then REMOVED.
       - ../downloads/complete/books:/cwa-book-ingest
