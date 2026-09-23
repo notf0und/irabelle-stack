@@ -55,6 +55,165 @@ script changes. A stack may also ship its own `.env.example` (see
 local recursive Unbound on a private bridge behind it. It needs the host VLAN
 from `host-vlan.sh` first — see [NETWORK.md](NETWORK.md).
 
+## Bootstrapping a host with no DNS yet
+
+This LAN's only resolver is the Pi-hole this stack runs, so a brand new host
+can't resolve *anything* before that Pi-hole exists — including the
+`git clone` and `docker pull` this repo itself needs. Paste this whole block
+into an SSH session on the new host and it gets out of that on its own:
+
+```sh
+# 1. a reusable escape hatch, kept in $HOME on purpose so re-cloning the
+#    stack never takes it with it. setup.sh reverts this automatically once
+#    adblock (Pi-hole) is confirmed running — see the end of its own output.
+cat > ~/manual-dns.sh <<'MANUAL_DNS_SCRIPT'
+#!/usr/bin/env bash
+# ---------------------------------------------------------------------------
+# manual-dns.sh — point this machine's resolver at a public DNS server for a
+# while, then hand it back. Nothing is written to any configuration file.
+#
+#   ./manual-dns.sh on               # switch to 8.8.8.8
+#   ./manual-dns.sh on 1.1.1.1       # ...or to something else
+#   ./manual-dns.sh off              # back to the network-provided resolver
+#   ./manual-dns.sh status           # what is in use right now
+#
+# `on` and `off` need root and re-exec themselves through sudo. `status` does
+# not, and is the safe one to run any time.
+#
+# Why this exists: the router advertises its Pi-hole as the LAN resolver
+# (DHCP option 6) and has no other upstream (`noresolv=1`), so while Pi-hole is
+# down this machine cannot resolve anything — including the `git clone` and
+# `docker pull` needed to bring Pi-hole back. This is the way out of that
+# chicken-and-egg.
+#
+# The override is runtime-only: systemd-resolved forgets it at the next DHCP
+# lease renewal or reboot. `off` restores the network-provided value, which
+# will be Pi-hole again.
+#
+# It lives in the home directory on purpose — outside the checkout, so deleting
+# and re-cloning the stack does not take it with it.
+# ---------------------------------------------------------------------------
+set -euo pipefail
+
+SERVERS=(8.8.8.8)
+
+say()  { printf '\n\033[1m==>\033[0m %s\n' "$*"; }
+note() { printf '    %s\n' "$*"; }
+die()  { printf '\033[31mERROR: %s\033[0m\n' "$*" >&2; exit 1; }
+
+usage() {
+  cat <<'EOF'
+usage: ./manual-dns.sh [on [SERVER...] | off | status]
+
+  on      replace every link's resolver with the given servers (default 8.8.8.8)
+  off     hand the links back to what the network provides (DHCP)
+  status  show the resolver(s) in use and whether public names resolve
+
+Runtime only: no change to netplan, NetworkManager or resolved.conf, so a
+reboot or a lease renewal undoes it on its own.
+EOF
+}
+
+command -v resolvectl >/dev/null 2>&1 || die "resolvectl not found — this needs systemd-resolved"
+resolvectl status >/dev/null 2>&1 || die "systemd-resolved is not answering"
+
+# The links worth touching: every interface that actually carries an IPv4
+# address. Container and bridge interfaces are excluded — they have their own
+# resolver plumbing and nothing there needs a public DNS server.
+links() {
+  ip -o -4 addr show scope global 2>/dev/null \
+    | awk '{ print $2 }' \
+    | grep -vE '^(lo|docker[0-9]*|br-|veth|virbr|bond|tun|tap)' \
+    | sort -u
+}
+
+show_link() {                     # $1 = link
+  local dns
+  dns=$(resolvectl dns "$1" 2>/dev/null | sed 's/^Link [0-9]* ([^)]*): *//')
+  printf '    %-16s %s\n' "$1" "${dns:-(none)}"
+}
+
+status() {
+  local link
+  say "Resolver in use"
+  while read -r link; do
+    [ -n "$link" ] && show_link "$link"
+  done < <(links)
+  printf '\n    public names:  '
+  if timeout 6 resolvectl query github.com >/dev/null 2>&1; then
+    printf 'resolve\n'
+  else
+    printf 'DO NOT RESOLVE\n'
+  fi
+  printf '    default route: %s\n' "$(ip -4 route show default 2>/dev/null | head -1)"
+}
+
+set_dns() {
+  local link
+  say "Pointing every link at ${SERVERS[*]}"
+  while read -r link; do
+    [ -n "$link" ] || continue
+    printf '    %-16s ' "$link"
+    if resolvectl dns "$link" "${SERVERS[@]}" >/dev/null 2>&1; then
+      printf 'ok\n'
+    else
+      printf 'FAILED\n'
+    fi
+  done < <(links)
+  resolvectl flush-caches >/dev/null 2>&1 || true
+  status
+}
+
+revert_dns() {
+  local link
+  say "Reverting to the network-provided resolver"
+  while read -r link; do
+    [ -n "$link" ] || continue
+    printf '    %-16s ' "$link"
+    if resolvectl revert "$link" >/dev/null 2>&1; then
+      printf 'reverted\n'
+    else
+      printf 'FAILED\n'
+    fi
+  done < <(links)
+  resolvectl flush-caches >/dev/null 2>&1 || true
+  note "that is the LAN config again — Pi-hole, which fails while it is down"
+  status
+}
+
+case "${1:-status}" in
+  on)
+    shift
+    if [ $# -gt 0 ]; then SERVERS=("$@"); fi
+    if [ "$(id -u)" -ne 0 ]; then exec sudo -- "$0" on "${SERVERS[@]}"; fi
+    set_dns
+    ;;
+  off)
+    if [ "$(id -u)" -ne 0 ]; then exec sudo -- "$0" off; fi
+    revert_dns
+    ;;
+  status)          status ;;
+  -h|--help|help)  usage ;;
+  *)               usage >&2; exit 1 ;;
+esac
+MANUAL_DNS_SCRIPT
+chmod +x ~/manual-dns.sh
+
+# 2. point this host at a public resolver so the clone/pull below can resolve names
+~/manual-dns.sh on
+
+# 3. clone and bootstrap
+git clone git@github.com:notf0und/irabelle-stack.git irabelle-stack
+cd irabelle-stack
+./setup.sh
+```
+
+`setup.sh` hands `~/manual-dns.sh` back to the router's DNS on its own, once
+`adblock` (Pi-hole) is confirmed actually running — see its final "Manual DNS
+override" section. Nothing to do here afterward.
+
+Already have working DNS? Skip straight to [Quickstart](#quickstart) below.
+
 ## Quickstart
 
 ```sh

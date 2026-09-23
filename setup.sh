@@ -500,6 +500,17 @@ PY
       note "external stack paths already include this checkout"
     fi
   fi
+
+  # Adopt any stack found here right away — otherwise Dockhand only shows raw
+  # containers it noticed via the Docker socket ("Untracked"), not the proper
+  # *Internal* stacks .env-driven config expects, until update.sh's cron job
+  # happens to run (up to 12h later). update.sh does the actual scan+adopt via
+  # Dockhand's Import API; --no-pull because this is about registering what's
+  # already on disk, not about touching git.
+  if [ -x "$REPO_DIR/update.sh" ]; then
+    "$REPO_DIR/update.sh" --no-pull \
+      || warn "could not adopt stacks automatically — run it by hand: ./update.sh --no-pull"
+  fi
 fi
 
 # --- scheduled jobs ----------------------------------------------------------
