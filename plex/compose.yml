@@ -1,0 +1,58 @@
+# plex — the media server.
+#
+# On the host network, not app-bridge: that is what makes LAN clients (TVs,
+# phones, the desktop app) see it as local and find it on their own (GDM),
+# and stream straight from 32400. Two consequences:
+#
+#   * The other containers reach it through the host, not by container name:
+#     Sonarr, Radarr and Bazarr map the name `plex` to the host gateway (see
+#     arr/compose.yml), so http://plex:32400 still works from there.
+#   * Traefik still routes plex.$TLD to it: for a host-network container it
+#     dials host.docker.internal, which traefik/compose.yml maps to the host.
+#     No authentik in front — the Plex apps sign in with your Plex account and
+#     cannot do the authentik login.
+#
+# The media is the shared `../downloads` tree at /data/downloads, the same path
+# Sonarr and Radarr use, so the paths they report to Plex need no translation.
+#
+# `.env` carries TZ, PUID/PGID and, for one start only, PLEX_CLAIM — the claim
+# code (https://plex.tv/claim) that ties this server to your Plex account.
+# Deploy this stack from Dockhand, then run ./integrations.py: it asks for the
+# code, restarts Plex with it, and clears it again once the server is claimed
+# (a code is single-use and expires after four minutes anyway).
+
+services:
+  plex:
+    image: lscr.io/linuxserver/plex:latest
+    container_name: plex
+    network_mode: host
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      TZ: ${TZ:-Pacific/Auckland}
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+      # LinuxServer's recommended setting: use the Plex build that ships in the
+      # image instead of letting the container self-update onto a moving tag.
+      VERSION: docker
+      PLEX_CLAIM: ${PLEX_CLAIM:-}
+    volumes:
+      - ./config/plex:/config
+      - ../downloads:/data/downloads
+      # Transcodes are scratch data, so they live on the host's /tmp rather
+      # than in the checkout — nothing to clean up and nothing to back up.
+      - /tmp:/transcode
+    labels:
+      traefik.enable: true
+      traefik.http.services.plex.loadbalancer.server.port: 32400
+      traefik.http.routers.plex.rule: Host("plex") || Host("plex.${TLD:?TLD is not set in .env (see .env.example)}")
+      traefik.http.routers.plex.entrypoints: web
+      traefik.http.routers.plex.service: plex
+      traefik.http.routers.plex.middlewares: plex
+      traefik.http.middlewares.plex.redirectscheme.scheme: https
+      traefik.http.routers.plex-https.rule: Host("plex") || Host("plex.${TLD:?TLD is not set in .env (see .env.example)}")
+      traefik.http.routers.plex-https.entrypoints: websecure
+      traefik.http.routers.plex-https.service: plex
+      traefik.http.routers.plex-https.tls: true
+    restart: unless-stopped

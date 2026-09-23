@@ -59,3 +59,48 @@ host.env
 # The Dockhand API token ./setup.sh mints for itself and update.sh once
 # Dockhand authentication is on.
 dockhand/.api-token
+
+# The media tree arr, books and plex share. It is data, not configuration, and
+# it can be very large, so none of it belongs in git. ./setup.sh creates the
+# empty skeleton (downloads/movies, downloads/tv, ...) so Docker never has to
+# invent a root-owned directory here.
+downloads/
+
+# *arr stack: each application keeps its database, logs and settings in its own
+# config/<service>/ directory.
+**/config/bazarr/*
+**/config/prowlarr/*
+**/config/radarr/*
+**/config/sonarr/*
+**/config/transmission/*
+**/config/cleanuparr/*
+**/config/lingarr/*
+**/config/lingarr-db/*
+
+# Books: Calibre's library metadata and plugins, CWA's ingest state, Kavita's
+# database/covers and Shelfmark's settings and download history. books-glue/glue.py is
+# ours and stays tracked, as does the README next to it.
+**/config/calibre/*
+**/config/calibre-web-automated/*
+**/config/shelfmark/*
+**/config/kavita/*
+**/config/books-glue/*
+
+# Plex's database and media metadata.
+**/config/plex/*
+
+# SearXNG: the Valkey dump, the search cache, and settings.yml — per-install
+# config created by ./setup.sh from the committed .example, same deal as
+# traefik.yml and unbound.conf.
+**/config/searxng/cache/*
+**/config/searxng/data/*
+**/config/searxng/config/settings.yml
+
+# n8n: the workflows/credentials database and the sandbox cluster's mTLS
+# material (regenerated on first boot).
+**/config/n8n/*
+**/config/sandbox-tls/*
+
+# pocket-tts2's model and voice caches, downloaded on first run.
+pocket-tts2/config/models/*
+pocket-tts2/config/voices/*

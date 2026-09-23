@@ -1,0 +1,164 @@
+# n8n — the workflow automation UI and its sandboxed code-execution cluster.
+#
+# The stack is two pieces:
+#
+#   * the sandbox cluster (`sandbox-certs` -> `sandbox-api` -> `sandbox-runner-1`)
+#     runs user code in a throwaway Docker-in-Docker sandbox, so a workflow can
+#     execute JavaScript/Python without it running inside n8n itself. Its mTLS
+#     material lives in `config/sandbox-tls/` and is regenerated on first boot.
+#   * `n8n` itself, published through Traefik as `n8n.$TLD`.
+#
+# Web search is NOT bundled: point the assistant at the standalone searxng stack
+# in `../searxng`, which compose derives from TLD below. n8n trusts this repo's
+# root CA (mounted into the container) so `https://searxng.$TLD` verifies.
+#
+# No model gateway ships here either. The built-in AI assistant needs an LLM
+# endpoint, so if you use it, set N8N_INSTANCE_AI_MODEL_URL and
+# N8N_INSTANCE_AI_MODEL_API_KEY below to whatever you run. The workflow engine
+# and the sandbox work without one.
+#
+# `.env` carries TLD, TZ and three sandbox secrets; see `.env.example`.
+
+services:
+  # Generates the sandbox cluster's CA and per-service certificates. Runs once
+  # and exits; every other sandbox service waits for it to finish.
+  sandbox-certs:
+    image: ghcr.io/n8n-io/n8n-sandbox-service-api:latest
+    user: "0:0"
+    entrypoint: ["sh", "-c"]
+    command:
+      - >
+        bootstrap-mtls.sh --out-dir /tls --api-san sandbox-api
+        --control-san-prefix sandbox-runner &&
+        chown -R sandbox-api:sandbox-api /tls/api
+    environment:
+      NUM_RUNNERS: "1"
+    volumes:
+      # Kept in ./config rather than a named volume so the whole stack stays
+      # copy-paste portable. Safe to delete: it is regenerated on next boot.
+      - ./config/sandbox-tls:/tls
+
+  sandbox-api:
+    image: ghcr.io/n8n-io/n8n-sandbox-service-api:latest
+    depends_on:
+      sandbox-certs:
+        condition: service_completed_successfully
+    environment:
+      SANDBOX_API_KEYS: ${SANDBOX_API_KEYS:?SANDBOX_API_KEYS is unset - set it in n8n/.env (see .env.example) or in the Dockhand stack environment panel}
+      SANDBOX_API_RUNNER_REGISTRATION_TOKEN: ${SANDBOX_API_RUNNER_REGISTRATION_TOKEN:?SANDBOX_API_RUNNER_REGISTRATION_TOKEN is unset - set it in n8n/.env (see .env.example)}
+      SANDBOX_API_RUNNER_API_KEY: ${SANDBOX_API_RUNNER_API_KEY:?SANDBOX_API_RUNNER_API_KEY is unset - set it in n8n/.env (see .env.example)}
+      SANDBOX_API_GRPC_TLS_CERT_FILE: /tls/api/grpc-server.crt
+      SANDBOX_API_GRPC_TLS_KEY_FILE: /tls/api/grpc-server.key
+      SANDBOX_API_GRPC_TLS_CLIENT_CA_FILE: /tls/api/ca.crt
+      SANDBOX_API_RUNNER_CONTROL_GRPC_TLS_CA_FILE: /tls/api/ca.crt
+      SANDBOX_API_RUNNER_CONTROL_GRPC_TLS_CERT_FILE: /tls/api/control-grpc-api-client.crt
+      SANDBOX_API_RUNNER_CONTROL_GRPC_TLS_KEY_FILE: /tls/api/control-grpc-api-client.key
+      SANDBOX_API_RUNNER_CONTROL_GRPC_TLS_SERVER_NAME: sandbox-runner-1
+    volumes:
+      - ./config/sandbox-tls:/tls:ro
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+    # Deliberately no published ports: n8n reaches this by service name on the
+    # internal network, and 8080/9090 have no business on the host.
+
+  sandbox-runner-1:
+    image: ghcr.io/n8n-io/n8n-sandbox-service-runner-dind:latest
+    privileged: true
+    depends_on:
+      sandbox-api:
+        condition: service_healthy
+    environment:
+      SANDBOX_RUNNER_API_KEYS: ${SANDBOX_API_RUNNER_API_KEY:?SANDBOX_API_RUNNER_API_KEY is unset - set it in n8n/.env (see .env.example)}
+      SANDBOX_RUNNER_REGISTRATION_TOKEN: ${SANDBOX_API_RUNNER_REGISTRATION_TOKEN:?SANDBOX_API_RUNNER_REGISTRATION_TOKEN is unset - set it in n8n/.env (see .env.example)}
+      SANDBOX_RUNNER_API_GRPC_ADDR: sandbox-api:9090
+      SANDBOX_RUNNER_HTTP_BASE_URL: http://sandbox-runner-1:8080
+      SANDBOX_RUNNER_CONTROL_GRPC_LISTEN_ADDR: ":9091"
+      SANDBOX_RUNNER_CONTROL_GRPC_ADVERTISE_ADDR: sandbox-runner-1:9091
+      SANDBOX_RUNNER_ID: runner-1
+      SANDBOX_RUNNER_DOCKER_SANDBOX_IMAGE: ghcr.io/n8n-io/n8n-sandbox-service-sandbox:latest
+      SANDBOX_RUNNER_REGISTRATION_GRPC_CA_FILE: /tls/runner/ca.crt
+      SANDBOX_RUNNER_REGISTRATION_GRPC_CERT_FILE: /tls/runner/grpc-client.crt
+      SANDBOX_RUNNER_REGISTRATION_GRPC_KEY_FILE: /tls/runner/grpc-client.key
+      SANDBOX_RUNNER_REGISTRATION_GRPC_SERVER_NAME: sandbox-api
+      SANDBOX_RUNNER_CONTROL_GRPC_TLS_CERT_FILE: /tls/runner/control-grpc-server.crt
+      SANDBOX_RUNNER_CONTROL_GRPC_TLS_KEY_FILE: /tls/runner/control-grpc-server.key
+      SANDBOX_RUNNER_CONTROL_GRPC_TLS_CLIENT_CA_FILE: /tls/runner/ca.crt
+    volumes:
+      - ./config/sandbox-tls:/tls:ro
+    restart: unless-stopped
+    # Never expose this container: it runs privileged Docker-in-Docker.
+
+  n8n:
+    image: n8nio/n8n
+    container_name: n8n
+    depends_on:
+      sandbox-api:
+        condition: service_healthy
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      TZ: ${TZ:-Pacific/Auckland}
+      N8N_ENABLED_MODULES: instance-ai
+      # Optional: the AI assistant's model. Nothing is bundled, so point this at
+      # your own OpenAI- or Anthropic-compatible endpoint and key. Uncomment all
+      # three to turn the assistant on; the workflow engine and sandbox below
+      # work without them.
+      #N8N_INSTANCE_AI_MODEL: anthropic/claude-sonnet-5
+      #N8N_INSTANCE_AI_MODEL_URL: https://api.example.com
+      #N8N_INSTANCE_AI_MODEL_API_KEY: change-me
+      N8N_INSTANCE_AI_SANDBOX_ENABLED: "true"
+      N8N_INSTANCE_AI_SANDBOX_IMAGE: ghcr.io/n8n-io/n8n-sandbox-service-sandbox:latest
+      N8N_SANDBOX_SERVICE_URL: http://sandbox-api:8080
+      # Must be one of the keys in SANDBOX_API_KEYS. Deriving it here instead of
+      # keeping a second copy in .env is deliberate: two independently generated
+      # `change-me` values would never match, and the sandbox would reject n8n.
+      N8N_SANDBOX_SERVICE_API_KEY: ${SANDBOX_API_KEYS:?SANDBOX_API_KEYS is unset - set it in n8n/.env (see .env.example)}
+      # The standalone searxng stack, for the assistant's web search. Traefik
+      # routes it over HTTPS, which is why the container also gets the root CA.
+      N8N_INSTANCE_AI_SEARXNG_URL: https://searxng.${TLD:?TLD is not set in .env (see .env.example)}
+      # Behind Traefik, per the n8n reverse-proxy docs.
+      N8N_WEBHOOK_URL: https://n8n.${TLD:?TLD is not set in .env (see .env.example)}/
+      N8N_PROXY_HOPS: "1"
+      NODE_EXTRA_CA_CERTS: /usr/local/share/ca-certificates/root-ca.crt
+    volumes:
+      - ../traefik/generate_certificates/root-certificates/root-ca.crt:/usr/local/share/ca-certificates/root-ca.crt:ro
+      # n8n's data folder: SQLite database, workflows and credentials. A bind
+      # mount, never a named volume, so it goes with the checkout. If the folder
+      # arrives from another machine and n8n cannot write to it:
+      #   chown -R 1000:1000 config/n8n
+      - ./config/n8n:/home/node/.n8n
+    networks:
+      # app-bridge: how Traefik and searxng reach n8n. default: the sandbox
+      # cluster, which stays off app-bridge entirely.
+      - default
+      - app-bridge
+    labels:
+      traefik.enable: true
+      # n8n is on two networks; pin the one Traefik must use for its IP, or it
+      # may pick the internal one (172.x) it cannot route to and every request
+      # 504s.
+      traefik.docker.network: app-bridge
+      traefik.http.routers.n8n.rule: Host("n8n") || Host("n8n.${TLD:?TLD is not set in .env (see .env.example)}")
+      traefik.http.routers.n8n.entrypoints: web
+      traefik.http.routers.n8n.service: n8n
+      traefik.http.routers.n8n.middlewares: n8n
+      traefik.http.services.n8n.loadbalancer.server.port: 5678
+      traefik.http.middlewares.n8n.redirectscheme.scheme: https
+
+      traefik.http.routers.n8n-https.rule: Host("n8n") || Host("n8n.${TLD:?TLD is not set in .env (see .env.example)}")
+      traefik.http.routers.n8n-https.entrypoints: websecure
+      traefik.http.routers.n8n-https.tls: true
+    restart: unless-stopped
+    # No host port is published: n8n is reachable through Traefik only. For
+    # localhost testing without DNS, temporarily add: ports: ["5678:5678"]
+
+networks:
+  app-bridge:
+    external: true
+    driver: bridge

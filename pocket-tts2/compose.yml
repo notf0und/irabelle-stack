@@ -1,0 +1,68 @@
+# pocket-tts2 — the Pocket TTS 2.1.0 voice server for Home Assistant.
+#
+# One service, built here from its own Dockerfile. It speaks two protocols at
+# once:
+#
+#   * Wyoming on 10215 — what the Home Assistant voice pipeline (or the
+#     streaming_tts_proxy integration) connects to, and
+#   * an OpenAI-compatible API on 10216 — for OpenWebUI and anything else that
+#     expects /v1/audio/speech.
+#
+# NETWORKING: this is the one stack that deliberately uses `network_mode: host`.
+# Everywhere else in this repo a service sits on `app-bridge` and is published
+# through Traefik, but Traefik cannot front a Wyoming/mDNS service — there is no
+# HTTP hostname to route, and Home Assistant finds these servers by broadcasting
+# on the LAN, which a bridge network does not carry. Host networking is what makes
+# `POCKET_TTS_ZEROCONF` work and what puts 10215/10216 directly on the host for HA
+# to dial. The cost is isolation: the container shares the host's network stack,
+# so treat it as a host process rather than a sandboxed one.
+#
+# If you do not need mDNS auto-discovery and would rather have the isolation,
+# replace the `network_mode` line with an `app-bridge` network plus
+# `ports: ["10215:10215", "10216:10216"]`, and point HA at the host explicitly.
+#
+# Models and voices are downloaded into `config/models` and `config/voices` on
+# first run; both are gitignored.
+#
+# `.env` carries TZ and an optional Hugging Face token; see `.env.example`.
+
+services:
+  pocket-tts2:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: pocket-tts2:local
+    container_name: pocket-tts2
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      TZ: ${TZ:-Pacific/Auckland}
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+      # Wyoming protocol port — what Home Assistant connects to.
+      POCKET_TTS_WYOMING_PORT: 10215
+      # OpenAI-compatible API port.
+      POCKET_TTS_API_PORT: 10216
+      # Language model: english | spanish | spanish_24l | german | italian |
+      # portuguese | french_24l
+      POCKET_TTS_LANGUAGE: english
+      # Default voice; if unset the language's own default is used.
+      POCKET_TTS_VOICE: alba
+      # mDNS name for Home Assistant auto-discovery. Set it empty to disable.
+      POCKET_TTS_ZEROCONF: pocket-tts2
+      # '' = stream the first audio as soon as it exists (~150 ms). '... ' inserts
+      # a sacrificial prefix that some players need when they swallow the first
+      # word — slower, so only turn it on if you hear that.
+      POCKET_TTS_PREFIX: ""
+      # Output gain: 1.0 = normal, 1.5 = +50%.
+      POCKET_TTS_VOLUME: "1.5"
+      # Model and voice cache, inside the mounted config directory.
+      HF_HOME: /data/models
+      # Optional: a Hugging Face token lifts the anonymous download rate limit.
+      HF_TOKEN: ${HF_TOKEN:-}
+    volumes:
+      - ./config:/data
+    network_mode: host
+    entrypoint: ["/bin/bash", "/data/start_services.sh"]
+    restart: unless-stopped

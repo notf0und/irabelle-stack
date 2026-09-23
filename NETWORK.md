@@ -251,6 +251,34 @@ Two things this does **not** cover:
 mDNS/SSDP autodiscovery, and it puts HA on the host's stack: not on any Docker
 network, not placeable on a VLAN, invisible to every control above.
 
+Two stacks in this repo do use `network_mode: host`, both for discovery. `plex`,
+so LAN clients see it as local and find it by GDM broadcast (Traefik still
+routes `plex.$TLD` to it through `host.docker.internal`, and the containers
+that call it map the name `plex` to the host gateway). And `pocket-tts2`,
+for the same autodiscovery reason: Home Assistant finds a Wyoming TTS server
+by mDNS broadcast and then dials a raw port, neither of which a bridge network
+carries and neither of which Traefik can front. It is a deliberate exception, and
+`pocket-tts2/compose.yml` shows the bridge-plus-published-ports alternative for
+anyone who would rather have the isolation than the discovery.
+
+A **Docker VLAN is not the answer** for it, which is worth spelling out because
+Pi-hole lives on one and it looks like the tidier home. A VLAN address is a
+macvlan, and macvlan traffic stays inside its own segment: broadcasts never reach
+the parent interface, so mDNS auto-discovery — the entire reason `pocket-tts2`
+uses host networking — stops working. The parent/child path is also one-way in
+practice: a macvlan container cannot reach the host, and where the host holds a
+real address on that VLAN (as the client's server does) it cannot reach the
+container either. On the reference server the host *appears* to reach
+`192.168.10.5`, but look at the route — it goes `via 192.168.1.1`, i.e. out to the
+LAN router and back, because there is no path across the macvlan boundary.
+`adblock` covers the same gap for Pi-hole by attaching it to `app-bridge` as
+well, but nothing can bridge mDNS for a service that has no HTTP interface.
+
+So a Docker VLAN is for a service a **LAN client** must reach **at a fixed
+address, over a non-HTTP protocol** and does not need to discover — Pi-hole's DNS
+is the only one today. Anything with an HTTP interface belongs on `app-bridge`
+behind Traefik, and anything that needs broadcast discovery belongs on the host.
+
 ## 4. Router side
 
 On the client router, after the host side is up:

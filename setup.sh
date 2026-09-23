@@ -21,18 +21,24 @@
 #   1. the .env files the stacks read (gitignored, so never in the repo)
 #   2. the shared app-bridge network Dockhand attaches to
 #   3. the root CA behind the *.$TLD certificates
-#   4. traefik, and any other stack whose network dependencies are already
-#      met (adblock, once host-vlan.sh has run) — so https://<service>.$TLD
-#      already works once this script finishes, not only after a manual
-#      deploy
-#   5. Dockhand, on a directly reachable port, with a baseline configuration
-#      (timezone, update/prune/version-check settings) applied once
+#   4. the base stacks — traefik, adblock (once host-vlan.sh has run),
+#      authentik and Dockhand — so https://<service>.$TLD, the login and
+#      Dockhand already work once this script finishes. Everything else (arr,
+#      books, plex, ...) is only adopted into Dockhand, and deployed from there
+#   5. Dockhand, the fourth base stack, on a directly reachable port, with a
+#      baseline configuration (timezone, update/prune/version-check settings)
+#      applied once
 #   6. single sign-on: the authentik stack's admin login (the username is
 #      asked for once, the password generated) becomes the login for Dockhand
 #      too — a local Dockhand user of the same name, authentik registered as
 #      its OIDC provider, authentication switched on, and an API token for
 #      update.sh. Pi-hole needs nothing here: it sits behind authentik's
 #      forward auth in Traefik, with no password of its own.
+#   6b. the media apps (arr, books, plex), wired to each other and to
+#      authentik over their own APIs — integrations.py. Only what is running is
+#      wired, so on a first run that is nothing yet: update.sh runs it again
+#      after every pull, and ./integrations.py does it (and asks for the Plex
+#      claim code) right after you deploy them from Dockhand
 #   7. trust the root CA on this host (see --no-trust-ca above)
 #   8. tell Docker to wait for this checkout's filesystem at boot, if it is a
 #      separate mount (see --no-mount-guard above)
@@ -83,6 +89,8 @@ Environment:
   ADMIN_USERNAME          the authentik/Dockhand/Pi-hole login to create,
                           instead of asking (only used the first time, while
                           authentik/.env has none yet)
+  ADMIN_EMAIL             its email, instead of asking (same rule; required
+                          when there is no terminal to ask on)
 EOF
   exit "${1:-0}"
 }
@@ -223,6 +231,22 @@ for s in "${STACKS[@]}"; do
     sed -i "s|^[[:space:]]*TLD[[:space:]]*=.*|TLD=$ROOT_TLD|" "$s/.env"
     note "$s/.env: TLD was $stack_tld, synced to $ROOT_TLD (root .env is the source of truth)"
   fi
+  # A key the template gained after this .env was made (a new secret, say) is
+  # appended, generated if it is a `change-me` — existing values are never
+  # touched. Without this an older install would fail compose's `:?` checks
+  # the moment the stack's compose.yml starts using the new key.
+  if [ -f "$s/.env.example" ]; then
+    added=0
+    while IFS= read -r line; do
+      key=${line%%=*}
+      grep -q "^[[:space:]]*$key[[:space:]]*=" "$s/.env" && continue
+      [ "$added" = 1 ] || printf '\n# Added by ./setup.sh from .env.example:\n' >>"$s/.env"
+      printf '%s\n' "$line" | sed -e "s|@REPO_DIR@|$REPO_DIR|g" -e "s|@TLD@|${ROOT_TLD:-}|g" >>"$s/.env"
+      note "$s/.env: added $key"
+      added=1
+    done < <(grep -E '^[A-Za-z0-9_]+=' "$s/.env.example")
+    [ "$added" = 1 ] && generate_placeholders "$s/.env"
+  fi
 done
 note "stacks found: ${STACKS[*]}"
 
@@ -250,6 +274,32 @@ if [ -f "$AK_ENV" ] && [ -z "$(env_var "$AK_ENV" ADMIN_USERNAME)" ]; then
   sed -i "s|^ADMIN_USERNAME=.*|ADMIN_USERNAME=$ak_user|" "$AK_ENV"
   note "authentik login: $ak_user (password generated in $AK_ENV)"
 fi
+# Your email, asked for once, like the username: authentik keeps it on your
+# user, and Kavita and Shelfmark match your authentik login to the account
+# setup.sh makes for you there by it. Only while authentik/.env has none.
+if [ -f "$AK_ENV" ] && [ -z "$(env_var "$AK_ENV" ADMIN_EMAIL)" ]; then
+  ak_email=${ADMIN_EMAIL:-}
+  # A dot in the domain: authentik refuses an address like you@smart.
+  email_ok() { [[ "$1" =~ ^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$ ]]; }
+  if [ -z "$ak_email" ] && [ -t 0 ]; then
+    while :; do
+      read -r -p "    your email (for authentik, Kavita and Shelfmark): " ak_email \
+        || { ak_email=; break; }
+      email_ok "$ak_email" && break
+      warn "that does not look like an address (user@example.com)"
+    done
+  fi
+  if [ -z "$ak_email" ]; then
+    die "no terminal to ask for your email on — set ADMIN_EMAIL=you@example.com and re-run"
+  fi
+  email_ok "$ak_email" || die "ADMIN_EMAIL '$ak_email' does not look like an address (user@example.com)"
+  if grep -q '^ADMIN_EMAIL=' "$AK_ENV"; then
+    sed -i "s|^ADMIN_EMAIL=.*|ADMIN_EMAIL=$ak_email|" "$AK_ENV"
+  else
+    printf 'ADMIN_EMAIL=%s\n' "$ak_email" >>"$AK_ENV"
+  fi
+  note "authentik email: $ak_email"
+fi
 
 # adblock's dnsmasq wildcard is a real config file, not a .env — Compose can't
 # interpolate ${TLD} into it, so it's kept in sync here the same way. Only the
@@ -270,9 +320,11 @@ fi
 # Per-install config, kept out of git so a `git pull` can never be blocked by a
 # local edit — the same deal as .env above. Each one ships as a committed
 # .example and is copied into place here: Traefik's static config, which people
-# tweak (log level, ping, entrypoints), and Unbound's, which decides whether
-# this box recurses or forwards to somebody else's resolver.
-for f in traefik/config/traefik.yml adblock/config/unbound/unbound.conf; do
+# tweak (log level, ping, entrypoints), Unbound's, which decides whether this box
+# recurses or forwards to somebody else's resolver, and SearXNG's, which decides
+# what the meta-search engine exposes (notably the JSON API n8n calls).
+for f in traefik/config/traefik.yml adblock/config/unbound/unbound.conf \
+         searxng/config/searxng/config/settings.yml; do
   [ -f "$f.example" ] || continue
   if [ -d "$f" ]; then
     # A file mount whose source was missing left Docker to create a *directory*
@@ -340,6 +392,21 @@ for s in "${STACKS[@]}"; do
   note "service certificates are issued by cert-watcher.sh once Traefik runs"
 done
 
+# Python apps (Shelfmark) verify TLS against their own bundle, not the system
+# store, so trusting our CA there means handing them a bundle of their own:
+# this host's roots plus our CA. Rebuilt every run, so it follows both.
+CA_DIR=traefik/generate_certificates/root-certificates
+if [ -f "$CA_DIR/root-ca.crt" ]; then
+  for sys_bundle in /etc/ssl/certs/ca-certificates.crt /etc/pki/tls/certs/ca-bundle.crt; do
+    [ -f "$sys_bundle" ] || continue
+    cat "$sys_bundle" "$CA_DIR/root-ca.crt" >"$CA_DIR/ca-bundle.crt.tmp" \
+      && mv "$CA_DIR/ca-bundle.crt.tmp" "$CA_DIR/ca-bundle.crt"
+    break
+  done
+  [ -f "$CA_DIR/ca-bundle.crt" ] \
+    || warn "no system CA bundle found — Shelfmark's authentik login will not verify"
+fi
+
 # --- bind-mount paths --------------------------------------------------------
 # Docker creates a missing bind-mount source itself — as root, mode 0755. On a
 # directory mount that leaves a root-owned directory inside the checkout, and a
@@ -364,6 +431,7 @@ for svc in (data.get("services") or {}).values():
 PY
   while IFS= read -r d; do
     [ -n "$d" ] || continue
+    [ -e "$d" ] && continue  # several services can mount the same source
     if [[ "${d##*/}" == *.* ]]; then
       # Looks like a file. Docker would create a *directory* for it, and the
       # container would then read an empty one — do not paper over that.
@@ -381,7 +449,12 @@ done
 # above never sees them: Docker or the container would create them itself, as
 # root, and a root-owned directory inside the checkout cannot be emptied
 # without sudo. Create them here, while they are still yours.
-for d in dockhand/config/dockhand traefik/config/logs traefik/config/certificates; do
+# downloads/ is the media tree arr, books and plex share (see arr/compose.yml):
+# every container mounts it whole, so its layout is ours to create.
+for d in dockhand/config/dockhand traefik/config/logs traefik/config/certificates \
+         pocket-tts2/config/models pocket-tts2/config/voices \
+         downloads/tv downloads/movies downloads/books downloads/complete/books \
+         downloads/incomplete downloads/torrents/tv downloads/torrents/movies; do
   if [ ! -d "$REPO_DIR/$d" ]; then
     mkdir -p "$REPO_DIR/$d"
     note "created $d"
@@ -396,19 +469,32 @@ done
 # them yours — new files get it, and new subdirectories inherit it recursively —
 # without changing how any container runs and without hiding the data in a
 # volume. Needs the `acl` package; the warning below says so when it is absent.
-ACL_DIRS=(adblock/config/pihole dockhand/config/dockhand traefik/config/logs)
+ACL_DIRS=(adblock/config/pihole dockhand/config/dockhand traefik/config/logs
+          downloads
+          arr/config books/config plex/config searxng/config n8n/config
+          pocket-tts2/config)
+# The second pass below walks every *existing* file, so it is deliberately
+# limited to the small config directories. Running it over downloads/ would mean
+# traversing a media library that can hold terabytes, only to set an ACL that new
+# files inherit anyway.
+ACL_RECURSIVE_DIRS=(adblock/config/pihole dockhand/config/dockhand
+                    traefik/config/logs arr/config books/config plex/config
+                    searxng/config n8n/config pocket-tts2/config)
 if command -v setfacl >/dev/null 2>&1; then
   for d in "${ACL_DIRS[@]}"; do
     [ -d "$REPO_DIR/$d" ] || continue
     setfacl -m "d:u:$(id -un):rwX" -m "d:m:rwX" "$REPO_DIR/$d" 2>/dev/null \
       || warn "could not set the default ACL on $d"
+  done
+  for d in "${ACL_RECURSIVE_DIRS[@]}"; do
+    [ -d "$REPO_DIR/$d" ] || continue
     # Existing entries too, where they are already yours to change.
     setfacl -R -m "u:$(id -un):rwX" "$REPO_DIR/$d" 2>/dev/null || true
   done
 else
-  warn "setfacl not found: files a container writes under adblock/config/pihole,"
-  warn "dockhand/config/dockhand or traefik/config/logs stay root-owned (readable,"
-  warn "not editable). Install it once with: sudo apt install acl — then re-run this."
+  warn "setfacl not found: files a container writes under downloads/ or any"
+  warn "stack's config/ directory stay root-owned (readable, not editable)."
+  warn "Install it once with: sudo apt install acl — then re-run this."
 fi
 
 # Anything already root-owned in here came from a container start before this
@@ -451,17 +537,23 @@ if command -v findmnt >/dev/null 2>&1 && command -v systemctl >/dev/null 2>&1; t
   fi
 fi
 
-# --- 4. traefik, and any other stack whose networks are ready ---------------
-# Traefik has no macvlan dependency, so it always starts here — that's what
-# makes https://<service>.$TLD work right after this script finishes instead
-# of only after a manual deploy in Dockhand. A stack that needs app-macvlan
-# (adblock) only starts if host-vlan.sh already created it, matching the
-# check above — sudo is never something this script does on your behalf, so a
-# stack that isn't ready yet is skipped, not forced. dockhand is excluded: it
-# has its own dedicated start, health check and baseline configuration below.
-say "Starting traefik and any VLAN-ready stack"
-for s in "${STACKS[@]}"; do
-  [ "$s" = "dockhand" ] && continue
+# --- 4. the base stacks -------------------------------------------------------
+# Only the stacks everything else stands on start: traefik (every
+# https://<service>.$TLD name), adblock (the LAN's DNS), authentik (the login)
+# and Dockhand (where you deploy the rest). That is what makes those names,
+# that login and Dockhand work right after this script finishes. Every other stack — arr, books, plex and the rest — is left
+# for you: setup.sh adopts it into Dockhand below (update.sh --no-pull), and
+# you deploy it from there when you want it.
+#
+# A stack that needs app-macvlan (adblock) only starts if host-vlan.sh already
+# created it, matching the check above — sudo is never something this script
+# does on your behalf, so a stack that isn't ready yet is skipped, not forced.
+# Dockhand is a base stack too, but not in this loop: it has its own
+# dedicated start, health check and baseline configuration in step 5 below.
+BASE_STACKS=(traefik adblock authentik)
+say "Starting the base stacks: ${BASE_STACKS[*]} (and dockhand, below)"
+for s in "${BASE_STACKS[@]}"; do
+  [ -f "$s/compose.yml" ] || continue
   if grep -q 'driver:[[:space:]]*macvlan' "$s/compose.yml" 2>/dev/null \
      && ! docker network inspect app-macvlan >/dev/null 2>&1; then
     note "$s: skipped — needs the host VLAN (see warning above)"
@@ -472,6 +564,10 @@ for s in "${STACKS[@]}"; do
   else
     warn "$s failed to start — check: docker compose -f $s/compose.yml logs"
   fi
+done
+for s in "${STACKS[@]}"; do
+  case " dockhand ${BASE_STACKS[*]} " in *" $s "*) continue ;; esac
+  note "$s: not started — deploy it from Dockhand (it is adopted there below)"
 done
 
 # --- hand the host's DNS back to the router ----------------------------------
@@ -725,7 +821,9 @@ PY
   # Dockhand's Import API; --no-pull because this is about registering what's
   # already on disk, not about touching git.
   if [ -x "$REPO_DIR/update.sh" ]; then
-    "$REPO_DIR/update.sh" --no-pull \
+    # --no-integrations: this script runs integrations.py itself, after the
+    # single sign-on step below, which the OIDC apps need first.
+    "$REPO_DIR/update.sh" --no-pull --no-integrations \
       || warn "could not adopt stacks automatically — run it by hand: ./update.sh --no-pull"
   fi
 
@@ -883,6 +981,15 @@ fetch(process.argv[1])
   fi
 fi
 
+# --- wire the media apps together --------------------------------------------
+# After single sign-on on purpose: Kavita, Shelfmark and Cleanuparr log in
+# through authentik, and Kavita checks authentik is really there before it
+# accepts that. Only apps that are running are touched, only what is missing
+# is added, and a re-run changes nothing — see integrations.py.
+chmod +x "$REPO_DIR/integrations.py" 2>/dev/null || true
+python3 "$REPO_DIR/integrations.py" \
+  || warn "wiring the apps together failed part-way — re-run: ./integrations.py"
+
 # --- scheduled jobs ----------------------------------------------------------
 say "Scheduled jobs"
 install_cron() {
@@ -1034,15 +1141,25 @@ if [ "$TRAEFIK_UP" = yes ]; then
   1. traefik is already running (started by this script) — the
      https://<service>.$ROOT_TLD names work as soon as a service is deployed
      and cert-watcher.sh has issued its certificate.
-  2. Deploy the rest whenever you like. New stacks turn up in the list after
-     update.sh runs, ready for you to deploy.
+  2. Deploy the rest from Dockhand whenever you like — arr, books, plex and
+     the others are already there, adopted and waiting. New stacks turn up
+     in the list after update.sh runs.
+  3. After deploying arr, books or plex, run ./integrations.py to connect
+     them to each other and to authentik now (the update cron job does it
+     within 12 hours otherwise) — and, for plex, to claim it with a code
+     from https://plex.tv/claim.
 EOF
 else
   cat <<EOF
   1. Deploy **traefik** first — every other service is published through it, so
      the https://<service>.$ROOT_TLD names only work once it is up.
-  2. Deploy the rest whenever you like. New stacks turn up in the list after
-     update.sh runs, ready for you to deploy.
+  2. Deploy the rest from Dockhand whenever you like — arr, books, plex and
+     the others are already there, adopted and waiting. New stacks turn up
+     in the list after update.sh runs.
+  3. After deploying arr, books or plex, run ./integrations.py to connect
+     them to each other and to authentik now (the update cron job does it
+     within 12 hours otherwise) — and, for plex, to claim it with a code
+     from https://plex.tv/claim.
 EOF
 fi
 

@@ -8,6 +8,7 @@
 #   ./update.sh --no-pull      register what is on disk now, without pulling
 #   ./update.sh --path DIR     scan DIR instead of this checkout
 #   ./update.sh --deploy       deploy whatever was newly adopted (opt-in)
+#   ./update.sh --no-integrations   skip integrations.py (see below)
 #
 # Built for cron, installed by ./setup.sh:
 #
@@ -26,6 +27,9 @@
 #
 # Registration on its own is inert: nothing is started, stopped or restarted
 # unless you pass --deploy.
+#
+# Each run also runs ./integrations.py, which connects whatever media apps you
+# have deployed since (arr, books, plex) to each other and to authentik.
 #
 # Environment:
 #   DOCKHAND_URL     default: the dockhand container's address (via docker)
@@ -47,6 +51,7 @@ fi
 DRY_RUN=0
 DO_PULL=1
 DO_DEPLOY=0
+DO_INTEGRATIONS=1
 SCAN_PATH=$REPO_DIR
 
 say()  { printf '\n\033[1m==>\033[0m %s\n' "$*"; }
@@ -61,6 +66,7 @@ Usage: ./update.sh [options]
   --no-pull      skip git and register what is on disk now
   --path DIR     scan DIR instead of this checkout
   --deploy       deploy the stacks that were newly adopted
+  --no-integrations  do not run integrations.py (wiring deployed apps together)
   -h, --help     this text
 
 Environment: DOCKHAND_URL, DOCKHAND_TOKEN, DOCKHAND_ENV, UPDATE_LOCK
@@ -73,6 +79,7 @@ while [ $# -gt 0 ]; do
     --dry-run) DRY_RUN=1 ;;
     --no-pull) DO_PULL=0 ;;
     --deploy) DO_DEPLOY=1 ;;
+    --no-integrations) DO_INTEGRATIONS=0 ;;
     --path) shift; SCAN_PATH=${1:?--path needs a value} ;;
     -h|--help) usage 0 ;;
     *) echo "Unknown option: $1" >&2; usage 2 ;;
@@ -149,6 +156,18 @@ if [ "$DRY_RUN" = 0 ]; then
     echo "another update is already running — exiting"
     exit 0
   fi
+fi
+
+# --- wire deployed apps together -----------------------------------------------
+# The media stacks are deployed from Dockhand, whenever you choose to, so this
+# is where they get connected to each other and to authentik afterwards:
+# integrations.py only touches what is running and only adds what is missing,
+# so on every other run it is a no-op. Never fatal for the update itself.
+# (Run ./integrations.py by hand right after a deploy to have it done now — and
+# to be asked for the Plex claim code, which needs a terminal.)
+if [ "$DRY_RUN" = 0 ] && [ "$DO_INTEGRATIONS" = 1 ] && [ -f "$REPO_DIR/integrations.py" ]; then
+  python3 "$REPO_DIR/integrations.py" </dev/null \
+    || echo "integrations.py failed part-way — run it by hand: $REPO_DIR/integrations.py" >&2
 fi
 
 say "Dockhand at $DOCKHAND_URL"

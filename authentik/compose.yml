@@ -111,6 +111,9 @@ services:
       ADMIN_EMAIL: ${ADMIN_EMAIL:-}
       AUTHENTIK_BOOTSTRAP_PASSWORD: ${AUTHENTIK_BOOTSTRAP_PASSWORD:?AUTHENTIK_BOOTSTRAP_PASSWORD is unset - run ./setup.sh, or set it in authentik/.env}
       DOCKHAND_OIDC_CLIENT_SECRET: ${DOCKHAND_OIDC_CLIENT_SECRET:?DOCKHAND_OIDC_CLIENT_SECRET is unset - run ./setup.sh, or set it in authentik/.env}
+      KAVITA_OIDC_CLIENT_SECRET: ${KAVITA_OIDC_CLIENT_SECRET:?KAVITA_OIDC_CLIENT_SECRET is unset - run ./setup.sh, or set it in authentik/.env}
+      SHELFMARK_OIDC_CLIENT_SECRET: ${SHELFMARK_OIDC_CLIENT_SECRET:?SHELFMARK_OIDC_CLIENT_SECRET is unset - run ./setup.sh, or set it in authentik/.env}
+      CLEANUPARR_OIDC_CLIENT_SECRET: ${CLEANUPARR_OIDC_CLIENT_SECRET:?CLEANUPARR_OIDC_CLIENT_SECRET is unset - run ./setup.sh, or set it in authentik/.env}
     shm_size: 512mb
     volumes: *authentik-volumes
     depends_on:

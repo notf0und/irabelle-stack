@@ -1,0 +1,396 @@
+# arr — the *arr media automation suite plus its download client.
+#
+# Every web UI is published through Traefik as `<name>.$TLD` behind authentik
+# (the full name only: a bare `sonarr` cannot carry the authentik login):
+# the https router carries the `authentik@docker` middleware, and the apps'
+# own login is off (Sonarr/Radarr/Prowlarr are set to External authentication
+# below, the rest have none). Cleanuparr is the exception: it speaks OIDC
+# itself, so it logs in through authentik directly instead.
+#
+# `/api` is routed separately, without authentik, so API clients (phone apps,
+# Home Assistant) keep working with the app's API key alone. The apps talk to
+# each other over app-bridge by container name (http://sonarr:8989, ...), never
+# through Traefik, so none of that goes through authentik either.
+#
+# The media lives in the shared `../downloads` tree at the repo root, mounted
+# at the same path — /data/downloads — in every container here and in plex.
+# One path everywhere means no remote path mappings, and one mount means a
+# finished download is hardlinked into the library instead of copied.
+#
+#   downloads/torrents/{tv,movies}   where Transmission puts finished downloads
+#   downloads/incomplete             in progress
+#   downloads/{tv,movies}            the libraries Sonarr/Radarr import into
+#
+# ./setup.sh wires everything together over the apps' APIs (see
+# integrations.py): Prowlarr to Sonarr/Radarr/Byparr and the public indexers,
+# Transmission as the download client, Bazarr, Lingarr and Cleanuparr to both.
+#
+# `.env` carries TZ, PUID/PGID and the generated API keys and secrets (see
+# .env.example). It is optional because a git-based deploy has none.
+
+services:
+  bazarr:
+    image: lscr.io/linuxserver/bazarr:latest
+    container_name: bazarr
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      TZ: ${TZ:-Pacific/Auckland}
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+    # Plex runs on the host network (see plex/compose.yml); this name reaches it.
+    extra_hosts:
+      - "plex:host-gateway"
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /etc/timezone:/etc/timezone:ro
+      - ../traefik/generate_certificates/root-certificates/root-ca.crt:/usr/local/share/ca-certificates/root-ca.crt:ro
+      - ./config/bazarr:/config
+      - ../downloads:/data/downloads
+    networks:
+      - app-bridge
+    labels:
+      traefik.enable: true
+      traefik.http.services.bazarr.loadbalancer.server.port: 6767
+      traefik.http.routers.bazarr.rule: Host("bazarr.${TLD:?TLD is not set in .env (see .env.example)}")
+      traefik.http.routers.bazarr.entrypoints: web
+      traefik.http.routers.bazarr.service: bazarr
+      traefik.http.routers.bazarr.middlewares: bazarr
+      traefik.http.middlewares.bazarr.redirectscheme.scheme: https
+      traefik.http.routers.bazarr-https.rule: Host("bazarr.${TLD:?TLD is not set in .env (see .env.example)}")
+      traefik.http.routers.bazarr-https.entrypoints: websecure
+      traefik.http.routers.bazarr-https.service: bazarr
+      traefik.http.routers.bazarr-https.tls: true
+      traefik.http.routers.bazarr-https.middlewares: authentik@docker
+      traefik.http.routers.bazarr-api.rule: Host("bazarr.${TLD:?TLD is not set in .env (see .env.example)}") && PathPrefix("/api")
+      traefik.http.routers.bazarr-api.entrypoints: websecure
+      traefik.http.routers.bazarr-api.service: bazarr
+      traefik.http.routers.bazarr-api.tls: true
+    restart: unless-stopped
+
+  # FlareSolverr's maintained successor: a headless browser the indexers use to
+  # get past Cloudflare. HTTP API only (8191), called by Prowlarr over
+  # app-bridge; the Traefik route is just for checking on it.
+  byparr:
+    image: ghcr.io/thephaseless/byparr:latest
+    container_name: byparr
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      TZ: ${TZ:-Pacific/Auckland}
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /etc/timezone:/etc/timezone:ro
+    networks:
+      - app-bridge
+    labels:
+      traefik.enable: true
+      traefik.http.services.byparr.loadbalancer.server.port: 8191
+      traefik.http.routers.byparr.rule: Host("byparr.${TLD:?TLD is not set in .env (see .env.example)}")
+      traefik.http.routers.byparr.entrypoints: web
+      traefik.http.routers.byparr.service: byparr
+      traefik.http.routers.byparr.middlewares: byparr
+      traefik.http.middlewares.byparr.redirectscheme.scheme: https
+      traefik.http.routers.byparr-https.rule: Host("byparr.${TLD:?TLD is not set in .env (see .env.example)}")
+      traefik.http.routers.byparr-https.entrypoints: websecure
+      traefik.http.routers.byparr-https.service: byparr
+      traefik.http.routers.byparr-https.tls: true
+      traefik.http.routers.byparr-https.middlewares: authentik@docker
+    restart: unless-stopped
+
+  # Removes stalled, slow and malware downloads from the queues, blocklists
+  # them in Sonarr/Radarr and lets those search again. Logs in through
+  # authentik over OIDC (configured by setup.sh), so no forward auth here.
+  cleanuparr:
+    image: ghcr.io/cleanuparr/cleanuparr:latest
+    container_name: cleanuparr
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      TZ: ${TZ:-Pacific/Auckland}
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+      PORT: 11011
+      UMASK: "022"
+      # Cleanuparr checks the authentik login itself, over https://authentik.$TLD.
+      # .NET uses OpenSSL here, which reads this: the system roots plus our CA
+      # (the bundle ./setup.sh writes next to the CA).
+      SSL_CERT_FILE: /certificates/ca-bundle.crt
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /etc/timezone:/etc/timezone:ro
+      - ./config/cleanuparr:/config
+      - ../downloads:/data/downloads
+      - ../traefik/generate_certificates/root-certificates:/certificates:ro
+    networks:
+      - app-bridge
+    labels:
+      traefik.enable: true
+      traefik.http.services.cleanuparr.loadbalancer.server.port: 11011
+      traefik.http.routers.cleanuparr.rule: Host("cleanuparr.${TLD:?TLD is not set in .env (see .env.example)}")
+      traefik.http.routers.cleanuparr.entrypoints: web
+      traefik.http.routers.cleanuparr.service: cleanuparr
+      traefik.http.routers.cleanuparr.middlewares: cleanuparr
+      traefik.http.middlewares.cleanuparr.redirectscheme.scheme: https
+      traefik.http.routers.cleanuparr-https.rule: Host("cleanuparr.${TLD:?TLD is not set in .env (see .env.example)}")
+      traefik.http.routers.cleanuparr-https.entrypoints: websecure
+      traefik.http.routers.cleanuparr-https.service: cleanuparr
+      traefik.http.routers.cleanuparr-https.tls: true
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11011/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 30s
+      retries: 3
+    restart: unless-stopped
+
+  # Machine-translates subtitles. Connected to Sonarr/Radarr by setup.sh with
+  # no languages set: pick source and target languages in its UI to use it.
+  lingarr:
+    image: ghcr.io/lingarr-translate/lingarr:latest
+    container_name: lingarr
+    # The media files' owner, so the subtitles it writes stay yours.
+    user: "${PUID:-1000}:${PGID:-1000}"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      TZ: ${TZ:-Pacific/Auckland}
+      ASPNETCORE_URLS: http://+:9876
+      DB_CONNECTION: mysql
+      DB_HOST: lingarr-db
+      DB_PORT: 3306
+      DB_DATABASE: lingarr
+      DB_USERNAME: lingarr
+      DB_PASSWORD: ${LINGARR_DB_PASSWORD:?LINGARR_DB_PASSWORD is unset - run ./setup.sh, or set it in arr/.env}
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /etc/timezone:/etc/timezone:ro
+      - ./config/lingarr:/app/config
+      - ../downloads:/data/downloads
+    networks:
+      - app-bridge
+      - lingarr
+    labels:
+      traefik.enable: true
+      traefik.http.services.lingarr.loadbalancer.server.port: 9876
+      traefik.http.routers.lingarr.rule: Host("lingarr.${TLD:?TLD is not set in .env (see .env.example)}")
+      traefik.http.routers.lingarr.entrypoints: web
+      traefik.http.routers.lingarr.service: lingarr
+      traefik.http.routers.lingarr.middlewares: lingarr
+      traefik.http.middlewares.lingarr.redirectscheme.scheme: https
+      traefik.http.routers.lingarr-https.rule: Host("lingarr.${TLD:?TLD is not set in .env (see .env.example)}")
+      traefik.http.routers.lingarr-https.entrypoints: websecure
+      traefik.http.routers.lingarr-https.service: lingarr
+      traefik.http.routers.lingarr-https.tls: true
+      traefik.http.routers.lingarr-https.middlewares: authentik@docker
+    depends_on:
+      lingarr-db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  lingarr-db:
+    image: mariadb:11
+    container_name: lingarr-db
+    # As you, for the same reason as authentik's postgres: the data is in the
+    # checkout.
+    user: "${PUID:-1000}:${PGID:-1000}"
+    environment:
+      MARIADB_DATABASE: lingarr
+      MARIADB_USER: lingarr
+      MARIADB_PASSWORD: ${LINGARR_DB_PASSWORD:?LINGARR_DB_PASSWORD is unset - run ./setup.sh, or set it in arr/.env}
+      MARIADB_ROOT_PASSWORD: ${LINGARR_DB_ROOT_PASSWORD:?LINGARR_DB_ROOT_PASSWORD is unset - run ./setup.sh, or set it in arr/.env}
+    volumes:
+      - ./config/lingarr-db:/var/lib/mysql
+    networks:
+      - lingarr
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+
+  prowlarr:
+    image: lscr.io/linuxserver/prowlarr:latest
+    container_name: prowlarr
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      TZ: ${TZ:-Pacific/Auckland}
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+      # Prowlarr talks to indexers over IPv4; leaving IPv6 on makes some of them
+      # resolve to an address this host cannot reach and time out.
+      DISABLE_IPV6: "1"
+      # The key is ours (generated into .env), so setup.sh never has to fish it
+      # out of config.xml; External = the login is authentik's.
+      PROWLARR__AUTH__APIKEY: ${PROWLARR_API_KEY:?PROWLARR_API_KEY is unset - run ./setup.sh, or set it in arr/.env}
+      PROWLARR__AUTH__METHOD: External
+      PROWLARR__AUTH__REQUIRED: Enabled
+    # Forces a single-label DNS name to be resolved as-is instead of being
+    # qualified with the container's search domain.
+    dns_search: .
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /etc/timezone:/etc/timezone:ro
+      - ./config/prowlarr:/config
+    networks:
+      - app-bridge
+    labels:
+      traefik.enable: true
+      traefik.http.services.prowlarr.loadbalancer.server.port: 9696
+      traefik.http.routers.prowlarr.rule: Host("prowlarr.${TLD:?TLD is not set in .env (see .env.example)}")
+      traefik.http.routers.prowlarr.entrypoints: web
+      traefik.http.routers.prowlarr.service: prowlarr
+      traefik.http.routers.prowlarr.middlewares: prowlarr
+      traefik.http.middlewares.prowlarr.redirectscheme.scheme: https
+      traefik.http.routers.prowlarr-https.rule: Host("prowlarr.${TLD:?TLD is not set in .env (see .env.example)}")
+      traefik.http.routers.prowlarr-https.entrypoints: websecure
+      traefik.http.routers.prowlarr-https.service: prowlarr
+      traefik.http.routers.prowlarr-https.tls: true
+      traefik.http.routers.prowlarr-https.middlewares: authentik@docker
+      traefik.http.routers.prowlarr-api.rule: Host("prowlarr.${TLD:?TLD is not set in .env (see .env.example)}") && PathPrefix("/api")
+      traefik.http.routers.prowlarr-api.entrypoints: websecure
+      traefik.http.routers.prowlarr-api.service: prowlarr
+      traefik.http.routers.prowlarr-api.tls: true
+    restart: unless-stopped
+
+  radarr:
+    image: lscr.io/linuxserver/radarr:latest
+    container_name: radarr
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      TZ: ${TZ:-Pacific/Auckland}
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+      RADARR__AUTH__APIKEY: ${RADARR_API_KEY:?RADARR_API_KEY is unset - run ./setup.sh, or set it in arr/.env}
+      RADARR__AUTH__METHOD: External
+      RADARR__AUTH__REQUIRED: Enabled
+    extra_hosts:
+      - "plex:host-gateway"
+    dns_search: .
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /etc/timezone:/etc/timezone:ro
+      - ./config/radarr:/config
+      - ../downloads:/data/downloads
+    networks:
+      - app-bridge
+    labels:
+      traefik.enable: true
+      traefik.http.services.radarr.loadbalancer.server.port: 7878
+      traefik.http.routers.radarr.rule: Host("radarr.${TLD:?TLD is not set in .env (see .env.example)}")
+      traefik.http.routers.radarr.entrypoints: web
+      traefik.http.routers.radarr.service: radarr
+      traefik.http.routers.radarr.middlewares: radarr
+      traefik.http.middlewares.radarr.redirectscheme.scheme: https
+      traefik.http.routers.radarr-https.rule: Host("radarr.${TLD:?TLD is not set in .env (see .env.example)}")
+      traefik.http.routers.radarr-https.entrypoints: websecure
+      traefik.http.routers.radarr-https.service: radarr
+      traefik.http.routers.radarr-https.tls: true
+      traefik.http.routers.radarr-https.middlewares: authentik@docker
+      traefik.http.routers.radarr-api.rule: Host("radarr.${TLD:?TLD is not set in .env (see .env.example)}") && PathPrefix("/api")
+      traefik.http.routers.radarr-api.entrypoints: websecure
+      traefik.http.routers.radarr-api.service: radarr
+      traefik.http.routers.radarr-api.tls: true
+    restart: unless-stopped
+
+  sonarr:
+    image: lscr.io/linuxserver/sonarr:latest
+    container_name: sonarr
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      TZ: ${TZ:-Pacific/Auckland}
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+      SONARR__AUTH__APIKEY: ${SONARR_API_KEY:?SONARR_API_KEY is unset - run ./setup.sh, or set it in arr/.env}
+      SONARR__AUTH__METHOD: External
+      SONARR__AUTH__REQUIRED: Enabled
+    extra_hosts:
+      - "plex:host-gateway"
+    dns_search: .
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /etc/timezone:/etc/timezone:ro
+      - ./config/sonarr:/config
+      - ../downloads:/data/downloads
+    networks:
+      - app-bridge
+    labels:
+      traefik.enable: true
+      traefik.http.services.sonarr.loadbalancer.server.port: 8989
+      traefik.http.routers.sonarr.rule: Host("sonarr.${TLD:?TLD is not set in .env (see .env.example)}")
+      traefik.http.routers.sonarr.entrypoints: web
+      traefik.http.routers.sonarr.service: sonarr
+      traefik.http.routers.sonarr.middlewares: sonarr
+      traefik.http.middlewares.sonarr.redirectscheme.scheme: https
+      traefik.http.routers.sonarr-https.rule: Host("sonarr.${TLD:?TLD is not set in .env (see .env.example)}")
+      traefik.http.routers.sonarr-https.entrypoints: websecure
+      traefik.http.routers.sonarr-https.service: sonarr
+      traefik.http.routers.sonarr-https.tls: true
+      traefik.http.routers.sonarr-https.middlewares: authentik@docker
+      traefik.http.routers.sonarr-api.rule: Host("sonarr.${TLD:?TLD is not set in .env (see .env.example)}") && PathPrefix("/api")
+      traefik.http.routers.sonarr-api.entrypoints: websecure
+      traefik.http.routers.sonarr-api.service: sonarr
+      traefik.http.routers.sonarr-api.tls: true
+    restart: unless-stopped
+
+  transmission:
+    image: lscr.io/linuxserver/transmission:latest
+    container_name: transmission
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      TZ: ${TZ:-Pacific/Auckland}
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /etc/timezone:/etc/timezone:ro
+      - ./config/transmission:/config
+      # The whole tree, at the same path as everywhere else, so a finished
+      # torrent can be hardlinked into a library instead of copied.
+      - ../downloads:/data/downloads
+    # Peer traffic only. The web UI is behind Traefik and authentik as
+    # transmission.$TLD, and 9091 is deliberately not published. 51413 must be
+    # reachable from the internet for incoming peers, so forward it on the
+    # router too.
+    ports:
+      - 51413:51413
+      - 51413:51413/udp
+    networks:
+      - app-bridge
+    labels:
+      traefik.enable: true
+      traefik.http.services.transmission.loadbalancer.server.port: 9091
+      traefik.http.routers.transmission.rule: Host("transmission.${TLD:?TLD is not set in .env (see .env.example)}")
+      traefik.http.routers.transmission.entrypoints: web
+      traefik.http.routers.transmission.service: transmission
+      traefik.http.routers.transmission.middlewares: transmission
+      traefik.http.middlewares.transmission.redirectscheme.scheme: https
+      traefik.http.routers.transmission-https.rule: Host("transmission.${TLD:?TLD is not set in .env (see .env.example)}")
+      traefik.http.routers.transmission-https.entrypoints: websecure
+      traefik.http.routers.transmission-https.service: transmission
+      traefik.http.routers.transmission-https.tls: true
+      traefik.http.routers.transmission-https.middlewares: authentik@docker
+    restart: unless-stopped
+
+networks:
+  app-bridge:
+    external: true
+    driver: bridge
+  # Lingarr and its database only.
+  lingarr:
+    name: lingarr
+    driver: bridge

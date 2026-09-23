@@ -1,0 +1,298 @@
+# books — the e-book pipeline: Calibre, Calibre-Web-Automated (CWA), the
+# Shelfmark downloader, Kavita, and a small glue service that keeps the three of
+# them in sync.
+#
+# The flow is:
+#
+#   downloader --> CWA ingest dir --> CWA imports into the Calibre library
+#                                        --> CWA web UI + Kavita
+#
+# Two folders in the shared `../downloads` tree carry it: `complete/books` is
+# the *ingest* folder (CWA consumes files from it and they disappear), and
+# `books` is the library itself. Both are mounted at the same paths across the
+# containers that need them, which is what lets `books-glue` translate between
+# the path the downloader recorded and the path the book actually ended up at.
+#
+# `books-glue` is our own script (`books-glue/glue.py`, stdlib only) and is the
+# one piece that is not an off-the-shelf container. See `books-glue/README.md`
+# for what it does and every toggle it understands.
+#
+# Logging in: Kavita and Shelfmark use authentik over OIDC; Calibre, CWA and
+# everything else sit behind authentik's forward auth. CWA also takes the
+# authentik username from the forward-auth header, so it logs you straight in
+# as the same user (set up by ./setup.sh, see integrations.py). CWA's OPDS and
+# Kobo sync paths skip authentik, because e-readers cannot do that login; they
+# use CWA's own password.
+#
+# `.env` carries TLD, TZ, PUID/PGID, the Kavita API key and the glue's toggles;
+# see `.env.example`. It is optional because a git-based deploy has none.
+
+services:
+  # The Calibre desktop GUI, in the browser via KasmVNC, at calibre.$TLD behind
+  # authentik. 8181/8081 are also published directly because BookFusion and
+  # some Calibre clients talk to them — those ports do not go through authentik.
+  calibre:
+    image: lscr.io/linuxserver/calibre:latest
+    container_name: calibre
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      TZ: ${TZ:-Pacific/Auckland}
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+    ports:
+      - 8181:8181
+      - 8081:8081
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /etc/timezone:/etc/timezone:ro
+      - ./config/calibre:/config
+      - ../downloads/books:/config/Calibre Library
+    networks:
+      - app-bridge
+    labels:
+      traefik.enable: true
+      traefik.http.services.calibre.loadbalancer.server.port: 8080
+      traefik.http.routers.calibre.rule: Host("calibre.${TLD:?TLD is not set in .env (see .env.example)}")
+      traefik.http.routers.calibre.entrypoints: web
+      traefik.http.routers.calibre.service: calibre
+      traefik.http.routers.calibre.middlewares: calibre
+      traefik.http.middlewares.calibre.redirectscheme.scheme: https
+      traefik.http.routers.calibre-https.rule: Host("calibre.${TLD:?TLD is not set in .env (see .env.example)}")
+      traefik.http.routers.calibre-https.entrypoints: websecure
+      traefik.http.routers.calibre-https.service: calibre
+      traefik.http.routers.calibre-https.tls: true
+      traefik.http.routers.calibre-https.middlewares: authentik@docker
+    restart: unless-stopped
+
+  # Watches the ingest folder and imports anything that lands in it into the
+  # Calibre library: converts to EPUB, writes metadata, and moves the file. It is
+  # also the web UI you actually browse the library with — it reads the library
+  # live, so a new book shows up without restarting anything.
+  calibre-web-automated:
+    image: crocodilestick/calibre-web-automated:latest
+    container_name: calibre-web-automated
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      TZ: ${TZ:-Pacific/Auckland}
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+    networks:
+      - app-bridge
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /etc/timezone:/etc/timezone:ro
+      - ./config/calibre-web-automated:/config
+      # Ingest, not library: anything placed here is imported and then REMOVED.
+      - ../downloads/complete/books:/cwa-book-ingest
+      # The library. CWA creates one if this is empty.
+      - ../downloads/books:/calibre-library
+      # Calibre plugins are installed through both apps; sharing the folder keeps
+      # them in step.
+      - ./config/calibre/.config/calibre/plugins:/config/.config/calibre/plugins
+      # CWA adds anything here to its trust store at start, so metadata and
+      # other https calls to *.$TLD services verify.
+      - ../traefik/generate_certificates/root-certificates:/certificates:ro
+    labels:
+      traefik.enable: true
+      traefik.http.services.calibre-web-automated.loadbalancer.server.port: 8083
+      traefik.http.routers.calibre-web-automated.rule: Host("calibre-web-automated.${TLD:?TLD is not set in .env (see .env.example)}")
+      traefik.http.routers.calibre-web-automated.entrypoints: web
+      traefik.http.routers.calibre-web-automated.service: calibre-web-automated
+      traefik.http.routers.calibre-web-automated.middlewares: calibre-web-automated
+      traefik.http.middlewares.calibre-web-automated.redirectscheme.scheme: https
+      traefik.http.routers.calibre-web-automated-https.rule: Host("calibre-web-automated.${TLD:?TLD is not set in .env (see .env.example)}")
+      traefik.http.routers.calibre-web-automated-https.entrypoints: websecure
+      traefik.http.routers.calibre-web-automated-https.service: calibre-web-automated
+      traefik.http.routers.calibre-web-automated-https.tls: true
+      # CWA builds absolute URLs from the scheme it sees; behind Traefik the TLS
+      # ends at the proxy, so tell it plainly that the client used https.
+      traefik.http.routers.calibre-web-automated-https.middlewares: authentik@docker,calibre-web-automated-https
+      traefik.http.middlewares.calibre-web-automated-https.headers.customrequestheaders.X-Scheme: https
+      # OPDS and Kobo sync, for e-readers: no authentik, CWA's own password.
+      # CWA logs in whoever the X-authentik-username header names (the header
+      # authentik sets on the router above), so this route must never pass a
+      # client-supplied one through — the empty value strips it.
+      traefik.http.routers.calibre-web-automated-opds.rule: Host("calibre-web-automated.${TLD:?TLD is not set in .env (see .env.example)}") && (PathPrefix("/opds") || PathPrefix("/kobo"))
+      traefik.http.routers.calibre-web-automated-opds.entrypoints: websecure
+      traefik.http.routers.calibre-web-automated-opds.service: calibre-web-automated
+      traefik.http.routers.calibre-web-automated-opds.tls: true
+      traefik.http.routers.calibre-web-automated-opds.middlewares: calibre-web-automated-https,calibre-web-automated-noauthheader
+      traefik.http.middlewares.calibre-web-automated-noauthheader.headers.customrequestheaders.X-authentik-username: ""
+    restart: unless-stopped
+
+  # Shelfmark: searches for and downloads books (direct from the shadow
+  # libraries, or as torrents through Prowlarr and Transmission), then drops
+  # them in the ingest folder. It also keeps a history of what it fetched
+  # (users.db), which is what books-glue rewrites once CWA has moved the file.
+  # Logs in through authentik over OIDC (set up by ./setup.sh).
+  shelfmark:
+    image: ghcr.io/calibrain/calibre-web-automated-book-downloader:latest
+    container_name: shelfmark
+    # The internal DDoS-Guard bypasser runs headless Chromium inside this
+    # container. Docker's default /dev/shm is 64 MB, which is too small for
+    # Chromium and makes tabs crash or stall mid-solve.
+    shm_size: 1gb
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      FLASK_PORT: 8084
+      LOG_LEVEL: info
+      USE_BOOK_TITLE: "true"
+      APP_ENV: prod
+      UID: ${PUID:-1000}
+      GID: ${PGID:-1000}
+      TZ: ${TZ:-Pacific/Auckland}
+      # Every bypass is serialized behind one Chromium helper, so high
+      # concurrency just queues downloads behind each other's solves. 2 keeps
+      # bulk downloads moving without starving a manual search.
+      MAX_CONCURRENT_DOWNLOADS: 2
+      DOWNLOAD_PROGRESS_UPDATE_INTERVAL: 5
+      # Manual-solve prompt (scripts/shelfmark): when the automated bypass
+      # fails, the challenge is held open and shown as a dialog inside
+      # Shelfmark's own UI instead of being reloaded and racing you.
+      MANUAL_SOLVE_SECONDS: 240
+      MANUAL_SOLVE_ONLY: ${MANUAL_SOLVE_ONLY:-false}
+      # Disk cache of Anna's Archive search pages, so a repeat search never pays
+      # another DDoS-Guard solve. Kept in /config so it survives a recreate.
+      AA_SEARCH_CACHE: ${AA_SEARCH_CACHE:-true}
+      AA_SEARCH_CACHE_TTL: ${AA_SEARCH_CACHE_TTL:-21600}
+      AA_SEARCH_CACHE_DIR: /config/aa-search-cache
+      AA_SEARCH_CACHE_MAX: ${AA_SEARCH_CACHE_MAX:-100}
+      # Go straight to the authentik login instead of showing a button first.
+      OIDC_AUTO_REDIRECT: "true"
+      # The login check is server-side, over https://authentik.$TLD: trust the
+      # system roots plus our own CA (the bundle ./setup.sh writes next to it).
+      REQUESTS_CA_BUNDLE: /certificates/ca-bundle.crt
+    volumes:
+      - ../downloads/complete/books:/cwa-book-ingest
+      # Read-only: the downloader serves relocated files from the library, but
+      # never writes to it.
+      - ../downloads/books:/calibre-library:ro
+      - ./config/shelfmark:/config
+      - ../traefik/generate_certificates/root-certificates:/certificates:ro
+      # The runtime shims (see scripts/shelfmark/README.md). Mounted into /app,
+      # which the image already has on PYTHONPATH, so Python finds
+      # sitecustomize there even if an image update renames the venv.
+      - ./scripts/shelfmark/sitecustomize.py:/app/sitecustomize.py:ro
+      - ./scripts/shelfmark/manual_solve_state.py:/app/manual_solve_state.py:ro
+      - ./scripts/shelfmark/manual_solve_bridge.py:/app/manual_solve_bridge.py:ro
+      - ./scripts/shelfmark/manual_solve_ui.py:/app/manual_solve_ui.py:ro
+      - ./scripts/shelfmark/aa_search_cache.py:/app/aa_search_cache.py:ro
+    networks:
+      - app-bridge
+    labels:
+      traefik.enable: true
+      traefik.http.services.shelfmark.loadbalancer.server.port: 8084
+      traefik.http.routers.shelfmark.rule: Host("shelfmark.${TLD:?TLD is not set in .env (see .env.example)}")
+      traefik.http.routers.shelfmark.entrypoints: web
+      traefik.http.routers.shelfmark.service: shelfmark
+      traefik.http.routers.shelfmark.middlewares: shelfmark
+      traefik.http.middlewares.shelfmark.redirectscheme.scheme: https
+      traefik.http.routers.shelfmark-https.rule: Host("shelfmark.${TLD:?TLD is not set in .env (see .env.example)}")
+      traefik.http.routers.shelfmark-https.entrypoints: websecure
+      traefik.http.routers.shelfmark-https.service: shelfmark
+      traefik.http.routers.shelfmark-https.tls: true
+    restart: unless-stopped
+
+  # Logs in through authentik over OIDC (set up by ./setup.sh). OPDS keeps
+  # working with Kavita's per-user OPDS URL, which carries its own key.
+  kavita:
+    image: lscr.io/linuxserver/kavita:latest
+    container_name: kavita
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      TZ: ${TZ:-Pacific/Auckland}
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+    volumes:
+      - ./config/kavita:/config
+      - ../downloads/books:/data
+      # Kavita checks the authentik login itself, over https://authentik.$TLD;
+      # the start hook adds our root CA to the system store for that.
+      - ../traefik/generate_certificates/root-certificates/root-ca.crt:/usr/local/share/ca-certificates/root-ca.crt:ro
+      - ./scripts/kavita/10-update-ca-certificates.sh:/custom-cont-init.d/10-update-ca-certificates.sh:ro
+    networks:
+      - app-bridge
+    labels:
+      traefik.enable: true
+      traefik.http.services.kavita.loadbalancer.server.port: 5000
+      traefik.http.routers.kavita.rule: Host("kavita.${TLD:?TLD is not set in .env (see .env.example)}")
+      traefik.http.routers.kavita.entrypoints: web
+      traefik.http.routers.kavita.service: kavita
+      traefik.http.routers.kavita.middlewares: kavita
+      traefik.http.middlewares.kavita.redirectscheme.scheme: https
+      traefik.http.routers.kavita-https.rule: Host("kavita.${TLD:?TLD is not set in .env (see .env.example)}")
+      traefik.http.routers.kavita-https.entrypoints: websecure
+      traefik.http.routers.kavita-https.service: kavita
+      traefik.http.routers.kavita-https.tls: true
+    restart: unless-stopped
+
+  # Keeps the pipeline in sync once CWA has moved a book into the library:
+  # rewrites Shelfmark's history so completed downloads keep working, triggers a
+  # Kavita scan so the book appears immediately, and once a day refreshes
+  # Shelfmark's shadow-library mirror list (scripts/shelfmark/refresh_mirrors.py).
+  # Pure stdlib Python; state lives in `config/books-glue/`.
+  books-glue:
+    image: python:3.12-alpine
+    container_name: books-glue
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      TZ: ${TZ:-Pacific/Auckland}
+      LIBRARY_DIR: /library
+      INGEST_DIR: /ingest
+      DOWNLOADER_DB: /downloader-config/users.db
+      DOWNLOADER_LIBRARY_PREFIX: /calibre-library
+      DOWNLOADER_INGEST_PREFIX: /cwa-book-ingest
+      KAVITA_URL: http://kavita:5000
+      KAVITA_API_KEY: ${KAVITA_API_KEY:-}
+      GLUE_ENABLED: ${GLUE_ENABLED:-true}
+      GLUE_FIX_DOWNLOADER: ${GLUE_FIX_DOWNLOADER:-true}
+      GLUE_SCAN_KAVITA: ${GLUE_SCAN_KAVITA:-true}
+      CALIBRE_AUTO_RESTART: ${CALIBRE_AUTO_RESTART:-false}
+      POLL_INTERVAL: "20"
+      ACTION_DEBOUNCE: "60"
+      ACTION_COOLDOWN: "300"
+      STATE_FILE: /state/seen.json
+      # Daily mirror refresh: open-slum.org says which mirrors are up; each new
+      # one is probed before it is added, and pushed into Shelfmark through its
+      # own settings API, which applies it live.
+      MIRROR_REFRESH_ENABLED: ${MIRROR_REFRESH_ENABLED:-true}
+      MIRROR_REFRESH_INTERVAL: ${MIRROR_REFRESH_INTERVAL:-86400}
+      MIRROR_REFRESH_SOURCES: ${MIRROR_REFRESH_SOURCES:-aa,libgen,zlib,welib}
+      MIRROR_REFRESH_SLUM_URL: ${MIRROR_REFRESH_SLUM_URL:-https://open-slum.org/}
+      MIRROR_REFRESH_API: http://shelfmark:8084/api/settings/mirrors
+      MIRROR_REFRESH_CONFIG: /downloader-config/plugins/mirrors.json
+      MIRROR_REFRESH_STATE: /state/mirror-refresh.json
+      MIRROR_REFRESH_VERIFY: ${MIRROR_REFRESH_VERIFY:-true}
+      MIRROR_REFRESH_INCLUDE_DEGRADED: ${MIRROR_REFRESH_INCLUDE_DEGRADED:-false}
+    volumes:
+      - ../downloads/books:/library:ro
+      - ../downloads/complete/books:/ingest:ro
+      - ./config/shelfmark:/downloader-config:rw
+      - ./books-glue/glue.py:/glue.py:ro
+      # Imported as a module by glue.py; without it the glue just skips the
+      # mirror refresh.
+      - ./scripts/shelfmark/refresh_mirrors.py:/refresh_mirrors.py:ro
+      - ./config/books-glue:/state
+      # Only needed for CALIBRE_AUTO_RESTART=true: the glue restarts the Calibre
+      # container so the GUI reloads the library. Read-only, and the glue works
+      # fine without it as long as that toggle stays false.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    command: ["python3", "/glue.py"]
+    networks:
+      - app-bridge
+    restart: unless-stopped
+
+networks:
+  app-bridge:
+    external: true
+    driver: bridge

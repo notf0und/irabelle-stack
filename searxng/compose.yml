@@ -1,0 +1,105 @@
+# searxng — the meta-search engine, with a small Valkey beside it.
+#
+# Two things make this stack slightly more than "run the image":
+#
+#   * `settings.yml` is per-install config, not a tracked file. It ships as
+#     `config/searxng/config/settings.yml.example` and ./setup.sh copies it into
+#     place, the same deal as Traefik's static config. The one setting that
+#     matters to the rest of the stack is `formats: [html, json]` — the JSON API
+#     is what n8n's web-search tool calls.
+#   * the secret key is NOT in that file. It comes from `SEARXNG_SECRET` in
+#     `.env`, which ./setup.sh generates, so a fresh clone never runs with the
+#     key from the image or from this repository.
+#
+# VALKEY is SearXNG's optional rate-limiter backend. It sits on `app-bridge`
+# with the rest of the stack; point `redis.url` in settings.yml at
+# `redis://searxng-redis:6379/0` to actually use it.
+#
+# `.env` carries TLD, TZ and SEARXNG_SECRET; see `.env.example`.
+
+services:
+  searxng:
+    image: docker.io/searxng/searxng:latest
+    container_name: searxng
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      TZ: ${TZ:-Pacific/Auckland}
+      # Must match the name this is published under, or SearXNG builds links to
+      # the wrong host. Compose interpolates ${TLD} here, so renaming the domain
+      # in .env and re-running ./setup.sh updates this too.
+      SEARXNG_BASE_URL: https://searxng.${TLD:?TLD is not set in .env (see .env.example)}
+      SEARXNG_SECRET: ${SEARXNG_SECRET:?SEARXNG_SECRET is unset - set it in searxng/.env (see .env.example) or in the Dockhand stack environment panel}
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /etc/timezone:/etc/timezone:ro
+      # The whole /etc/searxng directory, so the limiter's generated files and any
+      # extra config sit next to settings.yml.
+      - ./config/searxng/config:/etc/searxng
+      - ./config/searxng/cache:/var/cache/searxng
+      # The root CA this repo generates: lets SearXNG reach internal HTTPS
+      # endpoints through the same name it already trusts.
+      - ../traefik/generate_certificates/root-certificates/root-ca.crt:/usr/local/share/ca-certificates/root-ca.crt:ro
+    networks:
+      - app-bridge
+    # The image needs to chown its config on first start, and nothing more. If the
+    # very first boot crashes on initialization, comment out cap_drop for one run,
+    # then put it back.
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - SETGID
+      - SETUID
+    logging:
+      driver: json-file
+      options:
+        max-size: 1m
+        max-file: "1"
+    depends_on:
+      - searxng-redis
+    labels:
+      traefik.enable: true
+      traefik.http.routers.searxng.rule: Host("searxng") || Host("searxng.${TLD:?TLD is not set in .env (see .env.example)}")
+      traefik.http.routers.searxng.entrypoints: web
+      traefik.http.routers.searxng.service: searxng
+      traefik.http.routers.searxng.middlewares: searxng
+      traefik.http.services.searxng.loadbalancer.server.port: 8080
+      traefik.http.middlewares.searxng.redirectscheme.scheme: https
+
+      traefik.http.routers.searxng-https.rule: Host("searxng") || Host("searxng.${TLD:?TLD is not set in .env (see .env.example)}")
+      traefik.http.routers.searxng-https.entrypoints: websecure
+      traefik.http.routers.searxng-https.tls: true
+    restart: unless-stopped
+
+  searxng-redis:
+    image: docker.io/valkey/valkey:8-alpine
+    container_name: searxng-redis
+    # Save occasionally so a restart does not lose the limiter's counters.
+    command: valkey-server --save 30 1 --loglevel warning
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /etc/timezone:/etc/timezone:ro
+      - ./config/searxng/data:/data
+    networks:
+      - app-bridge
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+      - DAC_OVERRIDE
+    logging:
+      driver: json-file
+      options:
+        max-size: 1m
+        max-file: "1"
+    restart: unless-stopped
+
+networks:
+  app-bridge:
+    external: true
+    driver: bridge

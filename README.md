@@ -6,6 +6,12 @@ dashboard and [authentik](https://goauthentik.io) as the one login for both
 and for Pi-hole — that publishes services under an internal domain
 (`traefik.smart`, `dockhand.smart`, ...) with locally-signed certificates.
 
+On top of that foundation it ships a media stack (`arr`, `books` and `plex`, all
+sharing one `downloads/` tree), a private search engine (`searxng`), workflow
+automation with a sandboxed code runner (`n8n`), and a voice server for Home
+Assistant (`pocket-tts2`). Each is an independent stack — deploy the ones you
+want and ignore the rest.
+
 ```
 .
 ├── .env.example                     # template for the per-client .env files
@@ -37,16 +43,56 @@ and for Pi-hole — that publishes services under an internal domain
 │       ├── authentik/blueprints/irabelle.yaml  # user, Dockhand OIDC, Pi-hole proxy
 │       ├── authentik/data/          # media — not in git
 │       └── postgresql/              # the database — not in git
-└── adblock/
-    ├── compose.yml                  # Pi-hole + Unbound, on the Docker VLAN
-    ├── .env.example                 # TLD, TZ, static IPs
-    └── config/                          # one directory per service
-        ├── pihole/                      #   → /etc/pihole
-        │   ├── dnsmasq.d/99-irabelle.conf   # the *.$TLD wildcard
-        │   └── (database, blocklists — runtime state, not in git)
-        └── unbound/
-            ├── unbound.conf.example     # recursive resolver; setup.sh copies it
-            └── unbound.conf             # your copy — not in git
+├── adblock/
+│   ├── compose.yml                  # Pi-hole + Unbound, on the Docker VLAN
+│   ├── .env.example                 # TLD, TZ, static IPs
+│   └── config/                          # one directory per service
+│       ├── pihole/                      #   → /etc/pihole
+│       │   ├── dnsmasq.d/99-irabelle.conf   # the *.$TLD wildcard
+│       │   └── (database, blocklists — runtime state, not in git)
+│       └── unbound/
+│           ├── unbound.conf.example     # recursive resolver; setup.sh copies it
+│           └── unbound.conf             # your copy — not in git
+├── integrations.py                  # wires the media apps together (run by setup.sh)
+├── arr/
+│   ├── compose.yml                  # Sonarr, Radarr, Prowlarr, Bazarr, Lingarr,
+│   │                                # Cleanuparr, Byparr, Transmission
+│   └── .env.example                 # generated API keys and DB passwords
+├── books/
+│   ├── compose.yml                  # Calibre, CWA, Shelfmark, Kavita, books-glue
+│   ├── .env.example                 # TLD, TZ, PUID/PGID, KAVITA_API_KEY, toggles
+│   ├── books-glue/                  # our own sync script — tracked source
+│   │   ├── glue.py
+│   │   └── README.md
+│   └── scripts/
+│       ├── shelfmark/               # manual-solve prompt, AA search cache,
+│       │                            # mirror refresh (see its README)
+│       └── kavita/                  # start hook: trust our root CA
+├── plex/
+│   └── compose.yml                  # Plex, on the host network; plex.$TLD via Traefik
+├── searxng/
+│   ├── compose.yml                  # SearXNG + Valkey
+│   ├── .env.example                 # TLD, TZ, SEARXNG_SECRET
+│   └── config/searxng/config/
+│       └── settings.yml.example     # per-install; setup.sh copies it into place
+├── n8n/
+│   ├── compose.yml                  # n8n + its sandboxed code-execution cluster
+│   └── .env.example                 # TLD, TZ, PUID/PGID, sandbox secrets
+├── pocket-tts2/
+│   ├── compose.yml                  # voice server for Home Assistant (host net)
+│   ├── Dockerfile                   # built here, not pulled
+│   ├── .env.example                 # TLD, TZ, PUID/PGID, optional HF_TOKEN
+│   └── config/                      # mounted at /data, next to the caches
+│       ├── start_services.sh        # entrypoint: Wyoming + OpenAI API
+│       ├── wyoming_server.py
+│       └── openai_api.py
+└── downloads/                       # media tree shared by arr, books and plex,
+    ├── movies/                      #   at /data/downloads in every container
+    ├── tv/                          #   → libraries — data, not in git
+    ├── books/
+    ├── torrents/{tv,movies}/        #   → finished torrents, hardlinked into tv/movies
+    ├── complete/books/              #   → CWA ingest folder
+    └── incomplete/                  #   → in-progress downloads
 ```
 
 In a stack with more than one service, each service keeps its config and state
@@ -62,6 +108,42 @@ script changes. A stack may also ship its own `.env.example` (see
 `adblock` is the LAN's DNS: Pi-hole at 192.168.40.5 on the Docker VLAN, with a
 local recursive Unbound on a private bridge behind it. It needs the host VLAN
 from `host-vlan.sh` first — see [NETWORK.md](NETWORK.md).
+
+Beyond `traefik`, `dockhand` and `adblock`, the checkout ships six application
+stacks, each deployed the same way — pick it in Dockhand:
+
+| Stack | What it is | Published as |
+| --- | --- | --- |
+| `arr` | Sonarr, Radarr, Prowlarr, Bazarr, Lingarr, Cleanuparr, Byparr, Transmission | `sonarr.$TLD` … `transmission.$TLD` |
+| `books` | Calibre, Calibre-Web-Automated, Shelfmark, Kavita, and our `books-glue` sync service | `calibre.$TLD`, `calibre-web-automated.$TLD`, `shelfmark.$TLD`, `kavita.$TLD` |
+| `plex` | Plex | `plex.$TLD` |
+| `searxng` | SearXNG and its Valkey | `searxng.$TLD` |
+| `n8n` | n8n and its sandboxed code-execution cluster | `n8n.$TLD` |
+| `pocket-tts2` | Pocket TTS 2.1.0 for the Home Assistant voice pipeline | host ports 10215/10216 — see below |
+
+`arr`, `books` and `plex` all reach into the shared `downloads/` tree at the repo
+root, mounted whole at the same path — `/data/downloads` — in every container.
+One path everywhere means no remote path mappings between the apps, and one
+mount on one filesystem is what lets a finished torrent be *hardlinked* into
+the library instead of copied, which is the difference between an instant
+import and a full disk copy. `setup.sh` creates the empty skeleton there; the
+whole tree is gitignored.
+
+Every web UI in them logs in through authentik, and `setup.sh` wires them to
+each other — see [Media apps](#media-apps-wired-together-and-behind-authentik).
+
+Two stacks are worth a note on networking, because media and voice protocols sit
+awkwardly around an HTTP reverse proxy — one keeps the normal model, one cannot:
+
+* **`plex` uses `network_mode: host`**, so LAN clients (TVs, phones, the desktop
+  app) see it as local, find it on their own and stream straight from 32400.
+  Traefik still routes `plex.$TLD` to it (through `host.docker.internal`), and
+  the containers that talk to it — Sonarr, Radarr, Bazarr — map the name `plex`
+  to the host, so `http://plex:32400` works from there too. No authentik in
+  front: the Plex apps sign in with your Plex account.
+* **`pocket-tts2` uses `network_mode: host`**, because Home Assistant finds it by
+  mDNS broadcast and dials it on a raw Wyoming port. There is no hostname for
+  Traefik to route, so host networking is what makes it work at all.
 
 ## Bootstrapping a host with no DNS yet
 
@@ -238,13 +320,14 @@ work Dockhand cannot do for itself:
    that instead, so it can carry extra variables);
 2. create the shared `app-bridge` network Dockhand attaches to;
 3. generate the root CA behind the `*.$TLD` certificates;
-4. start **traefik**, and any other stack whose networks are already in
-   place — a stack needing `app-macvlan` (adblock) only starts once
-   `host-vlan.sh` has already created it, otherwise it's left for you to
-   deploy once that's done. This is what makes `https://<service>.<TLD>`
-   work right after this script finishes rather than only after a manual
-   deploy;
-5. start **Dockhand**;
+4. start the **base stacks** — traefik, adblock, authentik and Dockhand —
+   so `https://<service>.<TLD>`, the login and Dockhand work right after
+   this script finishes. adblock needs `app-macvlan`, so it only starts once
+   `host-vlan.sh` has created it. Every other stack (arr, books, plex, …) is
+   not started: it is adopted into Dockhand (step 6) and you deploy it from
+   there;
+5. start **Dockhand** (the last base stack, on its own because it needs a
+   health check and a baseline first);
 6. give Dockhand the things that are not in git — a local environment named
    **Irabelle** (timezone from `.env`'s `TZ`, scheduled updates applied
    automatically, automatic image pruning, version-tag checks and selfh.st
@@ -253,10 +336,14 @@ work Dockhand cannot do for itself:
    applied once, only when Dockhand's own database is empty (a fresh
    install); it never overwrites a setting you change afterward in
    Dockhand's UI, the same way an existing `.env` is left alone;
-7. set up **single sign-on** — it asks once for a username (your login for
-   authentik, Dockhand and Pi-hole) and generates the password, then makes
-   that the Dockhand login too and switches Dockhand's authentication on.
-   See [Single sign-on](#single-sign-on-authentik);
+7. set up **single sign-on** — it asks once for a username and your email
+   (your login for authentik, Dockhand, Pi-hole and the media apps) and
+   generates the password, then makes that the Dockhand login too and
+   switches Dockhand's authentication on. See
+   [Single sign-on](#single-sign-on-authentik). Then it wires together any
+   media apps that are already running (`integrations.py`, see
+   [Media apps](#media-apps-wired-together-and-behind-authentik)) — on a
+   first run none are yet;
 8. trust the root CA on this host itself (`sudo`; skip with `--no-trust-ca`)
    — every *client* device (phone, laptop, ...) still needs its own one-time
    step regardless, printed at the end alongside the CA's path;
@@ -275,8 +362,8 @@ work Dockhand cannot do for itself:
     its own. It only tries to launch a browser itself when the host has a
     display to draw on.
 
-Any stack added later than the ones above is still deployed by hand, from
-Dockhand's UI.
+Every stack other than the base ones — including any added later — is
+deployed by hand, from Dockhand's UI, where it is already waiting.
 
 Because Dockhand's own `dockhand.<TLD>` name needs Traefik, its port is
 published directly (`DOCKHAND_PORT`, default 3000) — that URL is the
@@ -296,13 +383,14 @@ file behind:
 ```
 
 `setup.sh` never issues service certificates and never overwrites an existing
-`.env`, root CA or certificate. It is safe to re-run. The only directories it
-creates are the two runtime ones a container and the watcher write into —
-`traefik/config/logs` and `traefik/config/certificates` — because Docker would
-otherwise invent `logs/` as root, and a root-owned `logs/` is what made the
-certificate watcher look broken: it could not write its own log, and the
-failing write aborted it under `set -e`. To deploy by hand instead, it is just
-compose:
+`.env`, root CA or certificate. It is safe to re-run. The directories it creates
+are the ones a container or the watcher would otherwise invent as root: every
+bind-mount source in the checkout, the shared `downloads/` skeleton, the TTS
+model and voice caches, and `traefik/config/logs` with
+`traefik/config/certificates`. That last pair is the cautionary tale — a
+root-owned `logs/` is what made the certificate watcher look broken: it could not
+write its own log, and the failing write aborted it under `set -e`. To deploy by
+hand instead, it is just compose:
 
 ```sh
 docker compose -f traefik/compose.yml up -d
@@ -354,9 +442,11 @@ where you can read and edit it. Three things make that work:
 * Where an image lets it, the container simply runs as you (`PUID`/`PGID`):
   every `authentik` container does, postgres included, so its database under
   `authentik/config/postgresql` is yours outright.
-* It then puts a **default ACL** on the directories containers write into
-  (`adblock/config/pihole`, `dockhand/config/dockhand`,
-  `traefik/config/logs`). New files inherit it, new subdirectories inherit it
+* It then puts a **default ACL** on the directories containers write into —
+  `downloads/`, `adblock/config/pihole`, `dockhand/config/dockhand`,
+  `traefik/config/logs`, and the `config/` root of every application stack
+  (`arr`, `books`, `plex`, `searxng`, `n8n`, `pocket-tts2`). New files inherit
+  it, new subdirectories inherit it
   recursively, and the upshot is that root-written files stay yours to edit and
   root-written directories stay yours to delete. It needs the `acl` package
   (`sudo apt install acl`); `setup.sh` warns with that line if `setfacl` is
@@ -391,10 +481,33 @@ the stack's **Environment variables** panel:
 The `authentik` stack needs everything in `authentik/.env.example` the same
 way — the secrets are the `change-me` lines there.
 
-`env_file` is declared optional in `adblock/compose.yml` for exactly this
-reason, so a missing `.env` is not an error, and Pi-hole is configured entirely
-from those panel values. The same variables in `adblock/.env` (via `setup.sh`)
-work identically for the CLI path — both at once is fine, the file wins.
+`env_file` is declared optional in the application stacks — `adblock`, `arr`,
+`books`, `plex`, `searxng`, `n8n` and `pocket-tts2` — for exactly this reason, so
+a missing `.env` is not an error and the panel can carry the values. The same
+variables in the stack's `.env` (via `setup.sh`) work identically for the CLI
+path — both at once is fine, the file wins.
+
+The stacks that ship their own `.env.example` are the ones carrying variables the
+repo root does not know about, so their panels need these:
+
+| Stack | Panel variables |
+| --- | --- |
+| `arr` | `TLD`, `TZ`, `PUID`, `PGID`, `SONARR_API_KEY`, `RADARR_API_KEY`, `PROWLARR_API_KEY`, `LINGARR_DB_PASSWORD`, `LINGARR_DB_ROOT_PASSWORD` |
+| `plex` | `TLD`, `TZ`, `PUID`, `PGID` — inherited from the repo root; `PLEX_CLAIM` for the one start that claims it |
+| `books` | `TLD`, `TZ`, `PUID`, `PGID`, `KAVITA_API_KEY`, and the optional `GLUE_*` / `CALIBRE_AUTO_RESTART` toggles |
+| `searxng` | `TLD`, `TZ`, `SEARXNG_SECRET` |
+| `n8n` | `TLD`, `TZ`, `PUID`, `PGID`, `SANDBOX_API_KEYS`, `SANDBOX_API_RUNNER_REGISTRATION_TOKEN`, `SANDBOX_API_RUNNER_API_KEY` |
+| `pocket-tts2` | `TLD`, `TZ`, `PUID`, `PGID`, and optionally `HF_TOKEN` |
+
+For the two that carry generated secrets — `searxng` (`SEARXNG_SECRET`) and `n8n`
+(the three sandbox values) — `setup.sh` fills them in from the literal
+`change-me` placeholder in the `.env.example`. When deploying from git instead,
+put any random string in the panel: compose refuses to start without them, which
+is deliberate, since an empty secret is worse than a missing one.
+
+`KAVITA_API_KEY` is the one value that cannot be generated: Kavita issues it.
+`setup.sh` creates your Kavita account and fills it in; on a git-based deploy,
+leave it empty until the stack has run once, then paste the key in.
 
 One caveat if you use Dockhand: before **1.0.40**, Deploy/Sync passed those
 variables to Compose but Start/Stop/Down did not, so a stack with any `${VAR}`
@@ -493,6 +606,67 @@ authentik also always has its own built-in `akadmin` account. You do not use
 it, but it is given a generated password (`AUTHENTIK_BOOTSTRAP_PASSWORD`),
 because an `akadmin` without one leaves authentik's first-run setup page open
 to anyone on the LAN.
+
+## Media apps: wired together and behind authentik
+
+The same authentik login covers every web UI in `arr`, `books` and `plex`,
+and the apps get connected to each other the way the reference server
+(station) has them, so a fresh install is ready to search and download
+without clicking through a dozen settings pages.
+
+These stacks are not started by `setup.sh`: it adopts them into Dockhand,
+and you deploy the ones you want from there. The wiring is `integrations.py`,
+which only touches apps that are running and only adds what is missing —
+anything you change in an app's UI afterwards is left alone. It runs at the
+end of `setup.sh` and on every `update.sh` run (the 12-hour cron job), so a
+stack you deploy gets wired on its own. To have it done straight away, run it
+right after deploying:
+
+```sh
+./integrations.py
+```
+
+Run by hand like that it is also what claims Plex (below).
+
+| App | Login | What `integrations.py` sets up |
+| --- | --- | --- |
+| Sonarr, Radarr | authentik forward auth (app login set to External) | root folder, Transmission as download client (into `downloads/torrents/…`), a Plex connection once Plex is claimed |
+| Prowlarr | forward auth (External) | Sonarr and Radarr as apps (full sync, so they get every indexer), Byparr as the Cloudflare proxy, Transmission, and station's working public trackers — 1337x, EZTV and Torrent Downloads through Byparr |
+| Bazarr | forward auth | Sonarr and Radarr, an English language profile as the default, the providers that need no account (embedded subtitles, Subf2m, BSPlayer) |
+| Lingarr | forward auth | first-run screen, Sonarr and Radarr. No languages: pick source and target in its UI to start translating |
+| Cleanuparr | authentik over OIDC | your account, Sonarr, Radarr, Transmission, the queue cleaner and the malware blocker |
+| Transmission, Byparr | forward auth | download and in-progress directories |
+| Plex | its own (your Plex account) | the Movies and TV Shows libraries, once claimed |
+| Kavita | authentik over OIDC | your admin account, the Books library (CWA's Calibre library), and the API key books-glue uses |
+| Shelfmark | authentik over OIDC | your admin account, Prowlarr and Transmission for torrents, and the path between Transmission and CWA's ingest folder |
+| Calibre-Web-Automated | forward auth, then authentik's username header | its default `admin` renamed to your login and given your password |
+| Calibre | forward auth | — |
+
+A few things worth knowing:
+
+* **API access skips authentik.** `/api` on Sonarr, Radarr, Prowlarr and
+  Bazarr has its own router without the middleware, so phone apps and Home
+  Assistant keep working with the app's API key alone. The apps talk to each
+  other over `app-bridge` by container name and never touch authentik.
+* **Every app with a login of its own keeps a local account** with your name
+  and the password from `authentik/.env` — the way in if authentik is down.
+  Like Dockhand's, it is a copy and does not follow a later change in
+  authentik.
+* **Plex has to be claimed once.** Once the plex stack is deployed, run
+  `./integrations.py` in a terminal: it asks for a code from
+  <https://plex.tv/claim> (valid four minutes — get it right before), restarts
+  Plex with it, and then creates the libraries and connects Sonarr and Radarr
+  on that same run. Enter skips; the cron runs never ask.
+* **E-readers.** CWA's `/opds` and `/kobo` paths skip authentik (an e-reader
+  cannot do that login) and use CWA's own password — your authentik one, as
+  set by `integrations.py`. Kavita's OPDS URL carries its own key. Calibre's
+  8181/8081 are also published directly, for BookFusion; those bypass
+  authentik too.
+* **Trust.** Kavita, Shelfmark and Cleanuparr check the authentik login
+  server-side over `https://authentik.<TLD>`, so they trust the root CA:
+  Kavita through a start hook (`books/scripts/kavita`), the others through
+  `ca-bundle.crt`, which `setup.sh` rebuilds next to the CA on every run from
+  this host's roots plus ours.
 
 ## Configuration
 
@@ -776,6 +950,15 @@ committed by accident:
 | `**/config/dockhand/*` | `.encryption_key`, sqlite DB, icon cache |
 | `**/config/postgresql/*`, `**/config/authentik/data/` | authentik's database (every user and session) and media |
 | `dockhand/.api-token` | the Dockhand API token `setup.sh` and `update.sh` use |
+| `downloads/` | the media tree `arr`, `books` and `plex` share — data, and potentially huge |
+| `**/config/{bazarr,prowlarr,radarr,sonarr,transmission}/*` | each *arr app's database, logs and settings |
+| `**/config/{cleanuparr,lingarr,lingarr-db}/*` | Cleanuparr's and Lingarr's settings, Lingarr's MariaDB |
+| `**/config/{calibre,calibre-web-automated,shelfmark,kavita,books-glue}/*` | the book pipeline's library metadata, download history and glue state (`books-glue/glue.py` stays tracked) |
+| `**/config/plex/*` | Plex's database, metadata and per-client preferences |
+| `**/config/searxng/{cache,data}/*` | the search cache and Valkey's dump |
+| `**/config/searxng/config/settings.yml` | per-install SearXNG config (`settings.yml.example` is committed) |
+| `**/config/{n8n,sandbox-tls}/*` | the workflow/credential database and the sandbox cluster's regenerated mTLS material |
+| `pocket-tts2/config/{models,voices}/*` | the TTS model and voice caches |
 
 The patterns use `**/` so any stack added later is covered without touching
 `.gitignore`. Nothing generated is committed and no `.gitkeep` placeholders are
