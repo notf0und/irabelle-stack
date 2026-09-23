@@ -638,11 +638,24 @@ fi
 AUTH_CODE=$(curl -s -o /dev/null -w '%{http_code}' -m 5 \
   "http://127.0.0.1:$DOCKHAND_PORT/api/environments" 2>/dev/null || true)
 
+# Gathered once, reused for the scp hint below and the URL list at the very
+# end. `ip -o` gives: "2: enp1s0    inet 192.168.1.2/24 brd ..." — dev is
+# field 2, the address is field 4.
+HOST_IPS=()
+while read -r _ dev _ cidr _; do
+  case "$dev" in lo|docker*|br-*|veth*) continue ;; esac
+  HOST_IPS+=("${cidr%%/*}")
+done < <(ip -4 -o addr show scope global 2>/dev/null)
+
 # --- trust the root CA --------------------------------------------------------
 CA_CRT="$REPO_DIR/traefik/generate_certificates/root-certificates/root-ca.crt"
 if [ -f "$CA_CRT" ]; then
   say "Root CA"
   note "$CA_CRT"
+  if [ -n "${HOST_IPS[0]:-}" ]; then
+    note "from your own machine, over SSH:"
+    note "  scp $(id -un)@${HOST_IPS[0]}:$CA_CRT ~/Downloads/irabelle-root.crt"
+  fi
   CA_TRUSTED_HERE=no
   if [ "$TRUST_CA" = yes ]; then
     if command -v update-ca-certificates >/dev/null 2>&1; then
@@ -728,24 +741,25 @@ fi
 TRAEFIK_UP=no
 [ -n "$(docker compose -f traefik/compose.yml ps --status running -q 2>/dev/null)" ] && TRAEFIK_UP=yes
 
-cat <<EOF
-
-Next, in Dockhand:
-  1. Settings -> Authentication: create an admin user.
-EOF
+# No "create a Dockhand admin user" step here on purpose: authentication is
+# left as-is deliberately (not just skipped) — the plan is an Authentik
+# container doing OIDC for Dockhand instead of a local Dockhand account, once
+# that's actually wired up. The warning below still fires either way, since
+# it's true regardless of which auth story ends up in place.
+say "What to do now"
 if [ "$TRAEFIK_UP" = yes ]; then
   cat <<EOF
-  2. traefik is already running (started by this script) — the
+  1. traefik is already running (started by this script) — the
      https://<service>.$ROOT_TLD names work as soon as a service is deployed
      and cert-watcher.sh has issued its certificate.
-  3. Deploy the rest whenever you like. New stacks turn up in the list after
+  2. Deploy the rest whenever you like. New stacks turn up in the list after
      update.sh runs, ready for you to deploy.
 EOF
 else
   cat <<EOF
-  2. Deploy **traefik** first — every other service is published through it, so
+  1. Deploy **traefik** first — every other service is published through it, so
      the https://<service>.$ROOT_TLD names only work once it is up.
-  3. Deploy the rest whenever you like. New stacks turn up in the list after
+  2. Deploy the rest whenever you like. New stacks turn up in the list after
      update.sh runs, ready for you to deploy.
 EOF
 fi
@@ -758,13 +772,8 @@ fi
 # This is the last thing printed on purpose — the actual "click this" moment,
 # so it is not something you have to scroll back up for.
 say "Dockhand is up — open one of these"
-# `ip -o` gives: "2: enp1s0    inet 192.168.1.2/24 brd ..." — dev is field 2,
-# the address is field 4.
 IP_URLS=()
-while read -r _ dev _ cidr _; do
-  case "$dev" in lo|docker*|br-*|veth*) continue ;; esac
-  IP_URLS+=("http://${cidr%%/*}:$DOCKHAND_PORT")
-done < <(ip -4 -o addr show scope global 2>/dev/null)
+for ip in "${HOST_IPS[@]}"; do IP_URLS+=("http://$ip:$DOCKHAND_PORT"); done
 
 # The real name goes first — clicking its OSC 8 hyperlink is what actually
 # opens it in *your* browser over SSH: the terminal you're reading this in
