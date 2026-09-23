@@ -1,0 +1,12 @@
+# Streams streamlink re-serves, one per port (46200-46250).
+#
+# ./setup.sh copies this to streams.yaml (gitignored) — edit that one, then
+# restart streamlink. Point threadfin's M3U entries (or any player) at
+# http://<this host>:<port>/.
+#
+# `stream` is anything streamlink can open (a YouTube/Twitch/... page, an HLS
+# URL). ok.ru streams go through the warp proxy automatically.
+
+- name: Example channel
+  stream: https://www.youtube.com/@NASA/live
+  port: 46200

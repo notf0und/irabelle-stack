@@ -104,3 +104,25 @@ downloads/
 # pocket-tts2's model and voice caches, downloaded on first run.
 pocket-tts2/config/models/*
 pocket-tts2/config/voices/*
+
+# smarthome: Home Assistant's config and database, Mosquitto's data, Zigbee2MQTT,
+# ESPHome's device configs and VoiceBM's models and recordings; ESPHome's
+# build cache (PlatformIO, several GB, re-downloadable) sits outside config/.
+**/config/homeassistant/*
+**/config/homeassistant-db/*
+**/config/mosquitto/*
+**/config/zigbee2mqtt/*
+**/config/esphome/*
+**/config/voicebm/*
+smarthome/cache/
+
+# iptv: threadfin's playlists and buffer, the WARP registration, and
+# streams.yaml — per-install, created by ./setup.sh from the committed .example.
+**/config/threadfin/*
+**/config/warp/*
+**/config/streamlink/streams.yaml
+
+# mail, ai: Mailpit's message store, Ollama's keys and its models.
+**/config/mailpit/*
+**/config/ollama/*
+ai/models/

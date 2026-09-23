@@ -1,0 +1,42 @@
+{
+  "mqtt": {
+    "broker": "localhost",
+    "port": 1883,
+    "user": "mqtt",
+    "password": ""
+  },
+  "hosts": {
+    "home_assistant": "localhost:8123"
+  },
+  "paths": {
+    "voicebm_base": "/data",
+    "sherpa_bin": "/data/bin/embed_stt.sh",
+    "sherpa_model": "/data/models/nemo_en_titanet_small.onnx"
+  },
+  "audio_server": {
+    "host": "127.0.0.1",
+    "port": 9090,
+    "base_url": "http://127.0.0.1:9090"
+  },
+  "rooms": {
+    "living": {
+      "rtsp_url": "",
+      "recorder_enabled": false
+    }
+  },
+  "thresholds": {
+    "passive": 0.22,
+    "active": 0.5
+  },
+  "voicebm": {
+    "enabled": true,
+    "sherpa_model": "nemo_en_titanet_small.onnx",
+    "stt_model": "cohere-transcribe",
+    "stt_language": "en",
+    "transcript_preferred": true,
+    "current_lead_trim_ms": 0
+  },
+  "dashboard": {
+    "port": 5000
+  }
+}

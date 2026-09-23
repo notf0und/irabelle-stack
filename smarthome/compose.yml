@@ -1,0 +1,253 @@
+# smarthome — Home Assistant and the services around it.
+#
+#   homeassistant     Home Assistant, on the host network (device discovery,
+#                     Bluetooth, the companion apps reach it on the LAN)
+#   homeassistant-db  MariaDB for its history (recorder)
+#   mqtt              Mosquitto — Zigbee2MQTT, ESPHome devices, VoiceBM and HA
+#                     all talk through it
+#   zigbee2mqtt       Zigbee USB coordinator -> MQTT; only started when
+#                     ./setup.sh found a dongle (COMPOSE_PROFILES=zigbee)
+#   esphome           ESPHome dashboard, to build and flash ESP devices
+#   voicebm           speaker recognition and speech-to-text for HA's voice
+#                     pipeline (built here, from build/voicebm)
+#
+# Logins: Home Assistant keeps its own — its companion apps and devices cannot
+# do the authentik login, so there is no authentik in front of it. ./setup.sh
+# (integrations.py) creates its owner account with your authentik login. The
+# other web UIs (Zigbee2MQTT, ESPHome, VoiceBM) have no login of their own and
+# sit behind authentik.
+#
+# Home Assistant and VoiceBM are on the host network, so the rest publish what
+# they need on the host: the database on 127.0.0.1 only, MQTT on the LAN (the
+# devices connect to it). Traefik reaches the host-network ones through
+# host.docker.internal.
+#
+# `.env` carries the generated passwords, this host's LAN address and the Zigbee
+# dongle; see .env.example.
+
+services:
+  homeassistant:
+    image: ghcr.io/home-assistant/home-assistant:stable
+    container_name: homeassistant
+    network_mode: host
+    # Bluetooth, USB devices and dbus, which a lot of integrations use.
+    privileged: true
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      TZ: ${TZ:-Pacific/Auckland}
+      # configuration.yaml reads this (`db_url: !env_var RECORDER_DB_URL`, set
+      # up by integrations.py), and the start hook waits for it.
+      RECORDER_DB_URL: mysql://homeassistant:${HA_DB_PASSWORD:?HA_DB_PASSWORD is unset - run ./setup.sh, or set it in smarthome/.env}@127.0.0.1:${HA_DB_PORT:-3306}/homeassistant?charset=utf8mb4
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /run/dbus:/run/dbus:ro
+      - ./config/homeassistant:/config
+      - ../traefik/generate_certificates/root-certificates/root-ca.crt:/usr/local/share/ca-certificates/irabelle-root.crt:ro
+      - ./scripts/homeassistant-entrypoint.sh:/irabelle-entrypoint.sh:ro
+    entrypoint: ["/irabelle-entrypoint.sh", "/init"]
+    depends_on:
+      homeassistant-db:
+        condition: service_healthy
+    labels:
+      traefik.enable: true
+      traefik.http.services.homeassistant.loadbalancer.server.port: 8123
+      traefik.http.routers.homeassistant.rule: Host("homeassistant.${TLD:?TLD is not set in .env (see .env.example)}")
+      traefik.http.routers.homeassistant.entrypoints: web
+      traefik.http.routers.homeassistant.service: homeassistant
+      traefik.http.routers.homeassistant.middlewares: homeassistant
+      traefik.http.middlewares.homeassistant.redirectscheme.scheme: https
+      traefik.http.routers.homeassistant-https.rule: Host("homeassistant.${TLD:?TLD is not set in .env (see .env.example)}")
+      traefik.http.routers.homeassistant-https.entrypoints: websecure
+      traefik.http.routers.homeassistant-https.service: homeassistant
+      traefik.http.routers.homeassistant-https.tls: true
+    restart: unless-stopped
+
+  homeassistant-db:
+    image: mariadb:11
+    container_name: homeassistant-db
+    # As you: the database lives in this checkout (or on the fast disk).
+    user: "${PUID:-1000}:${PGID:-1000}"
+    environment:
+      MARIADB_DATABASE: homeassistant
+      MARIADB_USER: homeassistant
+      MARIADB_PASSWORD: ${HA_DB_PASSWORD:?HA_DB_PASSWORD is unset - run ./setup.sh, or set it in smarthome/.env}
+      MARIADB_ROOT_PASSWORD: ${HA_DB_ROOT_PASSWORD:?HA_DB_ROOT_PASSWORD is unset - run ./setup.sh, or set it in smarthome/.env}
+    volumes:
+      - ./config/homeassistant-db:/var/lib/mysql
+    # For Home Assistant on the host network — this host only, never the LAN.
+    ports:
+      - "127.0.0.1:${HA_DB_PORT:-3306}:3306"
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+
+  mqtt:
+    image: eclipse-mosquitto:2
+    container_name: mqtt
+    user: "${PUID:-1000}:${PGID:-1000}"
+    environment:
+      MQTT_USER: ${MQTT_USER:-mqtt}
+      MQTT_PASSWORD: ${MQTT_PASSWORD:?MQTT_PASSWORD is unset - run ./setup.sh, or set it in smarthome/.env}
+    # The password file is (re)written from .env at every start, so .env is
+    # the one place the MQTT login is set.
+    command:
+      - sh
+      - -c
+      - >-
+        mosquitto_passwd -b -c /mosquitto/data/passwd "$$MQTT_USER" "$$MQTT_PASSWORD" &&
+        chmod 0700 /mosquitto/data/passwd &&
+        exec mosquitto -c /mosquitto/config/mosquitto.conf
+    volumes:
+      - ./mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - ./config/mosquitto:/mosquitto/data
+    # 1883 for the devices on the LAN (ESPHome, Tasmota, ...) and for HA and
+    # VoiceBM on the host network; 9001 is MQTT over websockets.
+    ports:
+      - "1883:1883"
+      - "9001:9001"
+    networks:
+      - app-bridge
+    restart: unless-stopped
+
+  zigbee2mqtt:
+    image: koenkk/zigbee2mqtt:latest
+    container_name: zigbee2mqtt
+    # Needs a Zigbee coordinator plugged in: ./setup.sh sets ZIGBEE_DEVICE and
+    # COMPOSE_PROFILES=zigbee in .env when it finds one, and without it the
+    # service simply does not start.
+    profiles: ["zigbee"]
+    user: "${PUID:-1000}:${PGID:-1000}"
+    group_add:
+      - dialout
+    environment:
+      TZ: ${TZ:-Pacific/Auckland}
+      # Settings from here instead of a hand-written configuration.yaml, so a
+      # fresh install needs no onboarding. Anything else is set in its UI.
+      Z2M_ONBOARD_NO_SERVER: "1"
+      ZIGBEE2MQTT_CONFIG_MQTT_SERVER: mqtt://mqtt:1883
+      ZIGBEE2MQTT_CONFIG_MQTT_USER: ${MQTT_USER:-mqtt}
+      ZIGBEE2MQTT_CONFIG_MQTT_PASSWORD: ${MQTT_PASSWORD:?MQTT_PASSWORD is unset - run ./setup.sh, or set it in smarthome/.env}
+      ZIGBEE2MQTT_CONFIG_SERIAL_PORT: /dev/ttyUSB0
+      ZIGBEE2MQTT_CONFIG_FRONTEND_ENABLED: "true"
+      ZIGBEE2MQTT_CONFIG_FRONTEND_PORT: "8080"
+      ZIGBEE2MQTT_CONFIG_HOMEASSISTANT_ENABLED: "true"
+    volumes:
+      - ./config/zigbee2mqtt:/app/data
+      - /run/udev:/run/udev:ro
+    devices:
+      - "${ZIGBEE_DEVICE:-/dev/null}:/dev/ttyUSB0"
+    networks:
+      - app-bridge
+    depends_on:
+      - mqtt
+    labels:
+      traefik.enable: true
+      traefik.http.services.zigbee2mqtt.loadbalancer.server.port: 8080
+      traefik.http.routers.zigbee2mqtt.rule: Host("zigbee2mqtt.${TLD:?TLD is not set in .env (see .env.example)}")
+      traefik.http.routers.zigbee2mqtt.entrypoints: web
+      traefik.http.routers.zigbee2mqtt.service: zigbee2mqtt
+      traefik.http.routers.zigbee2mqtt.middlewares: zigbee2mqtt
+      traefik.http.middlewares.zigbee2mqtt.redirectscheme.scheme: https
+      traefik.http.routers.zigbee2mqtt-https.rule: Host("zigbee2mqtt.${TLD:?TLD is not set in .env (see .env.example)}")
+      traefik.http.routers.zigbee2mqtt-https.entrypoints: websecure
+      traefik.http.routers.zigbee2mqtt-https.service: zigbee2mqtt
+      traefik.http.routers.zigbee2mqtt-https.tls: true
+      traefik.http.routers.zigbee2mqtt-https.middlewares: authentik@docker
+    restart: unless-stopped
+
+  esphome:
+    image: ghcr.io/esphome/esphome:latest
+    container_name: esphome
+    user: "${PUID:-1000}:${PGID:-1000}"
+    environment:
+      TZ: ${TZ:-Pacific/Auckland}
+      HOME: /cache
+      # On app-bridge rather than the host network (its dashboard has no login,
+      # and on the host it would be open to the whole LAN), so device status
+      # comes from ping instead of mDNS. Flashing over the air works the same.
+      ESPHOME_DASHBOARD_USE_PING: "true"
+      # The build cache (PlatformIO toolchains, several GB) in cache/, not
+      # config/: it is re-downloadable and has no business on the fast disk.
+      PLATFORMIO_CORE_DIR: /cache/platformio
+      XDG_CACHE_HOME: /cache
+    volumes:
+      - ./config/esphome:/config
+      - ./cache/esphome:/cache
+    networks:
+      - app-bridge
+    labels:
+      traefik.enable: true
+      traefik.http.services.esphome.loadbalancer.server.port: 6052
+      traefik.http.routers.esphome.rule: Host("esphome.${TLD:?TLD is not set in .env (see .env.example)}")
+      traefik.http.routers.esphome.entrypoints: web
+      traefik.http.routers.esphome.service: esphome
+      traefik.http.routers.esphome.middlewares: esphome
+      traefik.http.middlewares.esphome.redirectscheme.scheme: https
+      traefik.http.routers.esphome-https.rule: Host("esphome.${TLD:?TLD is not set in .env (see .env.example)}")
+      traefik.http.routers.esphome-https.entrypoints: websecure
+      traefik.http.routers.esphome-https.service: esphome
+      traefik.http.routers.esphome-https.tls: true
+      traefik.http.routers.esphome-https.middlewares: authentik@docker
+    restart: unless-stopped
+
+  voicebm:
+    build:
+      context: ./build/voicebm
+    image: irabelle/voicebm:local
+    container_name: voicebm
+    # Its audio server (9090), Wyoming proxy (HA's voice pipeline connects to
+    # it on 10301) and OpenAI-style transcription API (10302) are reached by HA
+    # on the same host and by cameras and speakers on the LAN. The dashboard
+    # (5000) is not: it only listens on the Docker bridge, for Traefik.
+    network_mode: host
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+      TZ: ${TZ:-Pacific/Auckland}
+      # Links to the dashboard point at its authentik-protected name…
+      HOST_URL: https://voicebm.${TLD:?TLD is not set in .env (see .env.example)}
+      # …and the dashboard itself listens on the Docker bridge only (see
+      # build/voicebm/Dockerfile): Traefik reaches it there, the LAN does not.
+      VOICEBM_DASHBOARD_HOST: ${DOCKER_GATEWAY_IP:-172.17.0.1}
+      HOST_AUDIO: http://${HOST_IP:?HOST_IP is unset - run ./setup.sh, or set it in smarthome/.env}:9090
+      HOME_ASSISTANT_HOST: http://localhost:8123
+      MQTT_BROKER: 127.0.0.1
+      MQTT_PORT: "1883"
+      MQTT_USER: ${MQTT_USER:-mqtt}
+      MQTT_PASS: ${MQTT_PASSWORD:?MQTT_PASSWORD is unset - run ./setup.sh, or set it in smarthome/.env}
+      # Models download on first start into config/voicebm (see .env.example).
+      SHERPA_MODEL_NAME: ${VOICEBM_SPEAKER_MODEL:-nemo_en_titanet_small.onnx}
+      VOICEBM_STT_MODEL: ${VOICEBM_STT_MODEL:-parakeet-tdt-0.6b-v2}
+      VOICEBM_STT_LANGUAGE: ${VOICEBM_STT_LANGUAGE:-en}
+      VOICEBM_STT_THREADS: ${VOICEBM_STT_THREADS:-4}
+      VOICEBM_WYOMING_PORT: "10301"
+    volumes:
+      - ./config/voicebm:/data
+    labels:
+      traefik.enable: true
+      traefik.http.services.voicebm.loadbalancer.server.port: 5000
+      traefik.http.routers.voicebm.rule: Host("voicebm.${TLD:?TLD is not set in .env (see .env.example)}")
+      traefik.http.routers.voicebm.entrypoints: web
+      traefik.http.routers.voicebm.service: voicebm
+      traefik.http.routers.voicebm.middlewares: voicebm
+      traefik.http.middlewares.voicebm.redirectscheme.scheme: https
+      traefik.http.routers.voicebm-https.rule: Host("voicebm.${TLD:?TLD is not set in .env (see .env.example)}")
+      traefik.http.routers.voicebm-https.entrypoints: websecure
+      traefik.http.routers.voicebm-https.service: voicebm
+      traefik.http.routers.voicebm-https.tls: true
+      traefik.http.routers.voicebm-https.middlewares: authentik@docker
+    restart: unless-stopped
+
+networks:
+  app-bridge:
+    external: true
+    driver: bridge

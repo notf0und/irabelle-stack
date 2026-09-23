@@ -8,8 +8,10 @@
 #     `state: created`, so a password changed in authentik's UI stays changed
 #   * Dockhand: an OIDC client; ./setup.sh registers the matching provider on
 #     Dockhand's side
-#   * Pi-hole and the media apps without a login of their own (Sonarr, Radarr,
-#     Prowlarr, Bazarr, Transmission, Lingarr, Byparr, Calibre, Calibre-Web):
+#   * Pi-hole and the apps without a login of their own (Sonarr, Radarr,
+#     Prowlarr, Bazarr, Transmission, Lingarr, Byparr, Calibre, Calibre-Web,
+#     Zigbee2MQTT, ESPHome, VoiceBM, Threadfin, Glances, Mailpit, Ollama,
+#     Traefik's dashboard, SearXNG, n8n):
 #     forward-auth proxy providers, served by the embedded outpost that
 #     Traefik's `authentik` middleware talks to
 #   * Kavita, Shelfmark and Cleanuparr: OIDC clients, like Dockhand's;
@@ -533,6 +535,264 @@ entries:
     attrs:
       order: 0
 
+  # --- smarthome, iptv, monitoring, mail, ai: forward auth ---------------------
+  # The web UIs of those stacks that have no login of their own. (Home
+  # Assistant is not here on purpose: it keeps its own login, which its apps
+  # and devices need.)
+  - model: authentik_providers_proxy.proxyprovider
+    id: zigbee2mqtt-provider
+    identifiers:
+      name: Zigbee2MQTT
+    attrs:
+      authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-implicit-consent]]
+      invalidation_flow: !Find [authentik_flows.flow, [slug, default-provider-invalidation-flow]]
+      mode: forward_single
+      external_host: !Format ["https://zigbee2mqtt.%s", !Context tld]
+  - model: authentik_core.application
+    id: zigbee2mqtt-app
+    identifiers:
+      slug: zigbee2mqtt
+    attrs:
+      name: Zigbee2MQTT
+      provider: !KeyOf zigbee2mqtt-provider
+      meta_launch_url: !Format ["https://zigbee2mqtt.%s/", !Context tld]
+      policy_engine_mode: any
+  - model: authentik_policies.policybinding
+    identifiers:
+      target: !KeyOf zigbee2mqtt-app
+      group: !Find [authentik_core.group, [name, authentik Admins]]
+    attrs:
+      order: 0
+
+  - model: authentik_providers_proxy.proxyprovider
+    id: esphome-provider
+    identifiers:
+      name: ESPHome
+    attrs:
+      authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-implicit-consent]]
+      invalidation_flow: !Find [authentik_flows.flow, [slug, default-provider-invalidation-flow]]
+      mode: forward_single
+      external_host: !Format ["https://esphome.%s", !Context tld]
+  - model: authentik_core.application
+    id: esphome-app
+    identifiers:
+      slug: esphome
+    attrs:
+      name: ESPHome
+      provider: !KeyOf esphome-provider
+      meta_launch_url: !Format ["https://esphome.%s/", !Context tld]
+      policy_engine_mode: any
+  - model: authentik_policies.policybinding
+    identifiers:
+      target: !KeyOf esphome-app
+      group: !Find [authentik_core.group, [name, authentik Admins]]
+    attrs:
+      order: 0
+
+  - model: authentik_providers_proxy.proxyprovider
+    id: voicebm-provider
+    identifiers:
+      name: VoiceBM
+    attrs:
+      authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-implicit-consent]]
+      invalidation_flow: !Find [authentik_flows.flow, [slug, default-provider-invalidation-flow]]
+      mode: forward_single
+      external_host: !Format ["https://voicebm.%s", !Context tld]
+  - model: authentik_core.application
+    id: voicebm-app
+    identifiers:
+      slug: voicebm
+    attrs:
+      name: VoiceBM
+      provider: !KeyOf voicebm-provider
+      meta_launch_url: !Format ["https://voicebm.%s/", !Context tld]
+      policy_engine_mode: any
+  - model: authentik_policies.policybinding
+    identifiers:
+      target: !KeyOf voicebm-app
+      group: !Find [authentik_core.group, [name, authentik Admins]]
+    attrs:
+      order: 0
+
+  - model: authentik_providers_proxy.proxyprovider
+    id: threadfin-provider
+    identifiers:
+      name: Threadfin
+    attrs:
+      authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-implicit-consent]]
+      invalidation_flow: !Find [authentik_flows.flow, [slug, default-provider-invalidation-flow]]
+      mode: forward_single
+      external_host: !Format ["https://threadfin.%s", !Context tld]
+  - model: authentik_core.application
+    id: threadfin-app
+    identifiers:
+      slug: threadfin
+    attrs:
+      name: Threadfin
+      provider: !KeyOf threadfin-provider
+      meta_launch_url: !Format ["https://threadfin.%s/web/", !Context tld]
+      policy_engine_mode: any
+  - model: authentik_policies.policybinding
+    identifiers:
+      target: !KeyOf threadfin-app
+      group: !Find [authentik_core.group, [name, authentik Admins]]
+    attrs:
+      order: 0
+
+  - model: authentik_providers_proxy.proxyprovider
+    id: glances-provider
+    identifiers:
+      name: Glances
+    attrs:
+      authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-implicit-consent]]
+      invalidation_flow: !Find [authentik_flows.flow, [slug, default-provider-invalidation-flow]]
+      mode: forward_single
+      external_host: !Format ["https://glances.%s", !Context tld]
+  - model: authentik_core.application
+    id: glances-app
+    identifiers:
+      slug: glances
+    attrs:
+      name: Glances
+      provider: !KeyOf glances-provider
+      meta_launch_url: !Format ["https://glances.%s/", !Context tld]
+      policy_engine_mode: any
+  - model: authentik_policies.policybinding
+    identifiers:
+      target: !KeyOf glances-app
+      group: !Find [authentik_core.group, [name, authentik Admins]]
+    attrs:
+      order: 0
+
+  - model: authentik_providers_proxy.proxyprovider
+    id: mailpit-provider
+    identifiers:
+      name: Mailpit
+    attrs:
+      authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-implicit-consent]]
+      invalidation_flow: !Find [authentik_flows.flow, [slug, default-provider-invalidation-flow]]
+      mode: forward_single
+      external_host: !Format ["https://mailpit.%s", !Context tld]
+  - model: authentik_core.application
+    id: mailpit-app
+    identifiers:
+      slug: mailpit
+    attrs:
+      name: Mailpit
+      provider: !KeyOf mailpit-provider
+      meta_launch_url: !Format ["https://mailpit.%s/", !Context tld]
+      policy_engine_mode: any
+  - model: authentik_policies.policybinding
+    identifiers:
+      target: !KeyOf mailpit-app
+      group: !Find [authentik_core.group, [name, authentik Admins]]
+    attrs:
+      order: 0
+
+  - model: authentik_providers_proxy.proxyprovider
+    id: ollama-provider
+    identifiers:
+      name: Ollama
+    attrs:
+      authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-implicit-consent]]
+      invalidation_flow: !Find [authentik_flows.flow, [slug, default-provider-invalidation-flow]]
+      mode: forward_single
+      external_host: !Format ["https://ollama.%s", !Context tld]
+  - model: authentik_core.application
+    id: ollama-app
+    identifiers:
+      slug: ollama
+    attrs:
+      name: Ollama
+      provider: !KeyOf ollama-provider
+      meta_launch_url: !Format ["https://ollama.%s/", !Context tld]
+      policy_engine_mode: any
+  - model: authentik_policies.policybinding
+    identifiers:
+      target: !KeyOf ollama-app
+      group: !Find [authentik_core.group, [name, authentik Admins]]
+    attrs:
+      order: 0
+
+  # --- traefik, searxng, n8n: forward auth ------------------------------------
+  # Traefik's dashboard (its bare `traefik` name stays local-only, for
+  # cert-watcher.sh), SearXNG's search page and n8n's editor (n8n's own login
+  # comes after; its webhooks skip authentik).
+  - model: authentik_providers_proxy.proxyprovider
+    id: traefik-provider
+    identifiers:
+      name: Traefik
+    attrs:
+      authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-implicit-consent]]
+      invalidation_flow: !Find [authentik_flows.flow, [slug, default-provider-invalidation-flow]]
+      mode: forward_single
+      external_host: !Format ["https://traefik.%s", !Context tld]
+  - model: authentik_core.application
+    id: traefik-app
+    identifiers:
+      slug: traefik
+    attrs:
+      name: Traefik
+      provider: !KeyOf traefik-provider
+      meta_launch_url: !Format ["https://traefik.%s/dashboard/", !Context tld]
+      policy_engine_mode: any
+  - model: authentik_policies.policybinding
+    identifiers:
+      target: !KeyOf traefik-app
+      group: !Find [authentik_core.group, [name, authentik Admins]]
+    attrs:
+      order: 0
+
+  - model: authentik_providers_proxy.proxyprovider
+    id: searxng-provider
+    identifiers:
+      name: SearXNG
+    attrs:
+      authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-implicit-consent]]
+      invalidation_flow: !Find [authentik_flows.flow, [slug, default-provider-invalidation-flow]]
+      mode: forward_single
+      external_host: !Format ["https://searxng.%s", !Context tld]
+  - model: authentik_core.application
+    id: searxng-app
+    identifiers:
+      slug: searxng
+    attrs:
+      name: SearXNG
+      provider: !KeyOf searxng-provider
+      meta_launch_url: !Format ["https://searxng.%s/", !Context tld]
+      policy_engine_mode: any
+  - model: authentik_policies.policybinding
+    identifiers:
+      target: !KeyOf searxng-app
+      group: !Find [authentik_core.group, [name, authentik Admins]]
+    attrs:
+      order: 0
+
+  - model: authentik_providers_proxy.proxyprovider
+    id: n8n-provider
+    identifiers:
+      name: n8n
+    attrs:
+      authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-implicit-consent]]
+      invalidation_flow: !Find [authentik_flows.flow, [slug, default-provider-invalidation-flow]]
+      mode: forward_single
+      external_host: !Format ["https://n8n.%s", !Context tld]
+  - model: authentik_core.application
+    id: n8n-app
+    identifiers:
+      slug: n8n
+    attrs:
+      name: n8n
+      provider: !KeyOf n8n-provider
+      meta_launch_url: !Format ["https://n8n.%s/", !Context tld]
+      policy_engine_mode: any
+  - model: authentik_policies.policybinding
+    identifiers:
+      target: !KeyOf n8n-app
+      group: !Find [authentik_core.group, [name, authentik Admins]]
+    attrs:
+      order: 0
+
   # The embedded outpost runs inside the authentik container and is what answers the
   # middleware. It only serves the providers listed here, so every
   # forward-auth provider above must be added to this list too.
@@ -553,6 +813,16 @@ entries:
         - !KeyOf byparr-provider
         - !KeyOf calibre-provider
         - !KeyOf calibre-web-automated-provider
+        - !KeyOf zigbee2mqtt-provider
+        - !KeyOf esphome-provider
+        - !KeyOf voicebm-provider
+        - !KeyOf threadfin-provider
+        - !KeyOf glances-provider
+        - !KeyOf mailpit-provider
+        - !KeyOf ollama-provider
+        - !KeyOf traefik-provider
+        - !KeyOf searxng-provider
+        - !KeyOf n8n-provider
       config:
         # Where the outpost sends a browser to log in. Without it, it guesses
         # from the request, which inside Docker is the container's own name.

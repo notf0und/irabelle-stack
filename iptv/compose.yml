@@ -1,0 +1,82 @@
+# iptv — live TV for Plex.
+#
+#   threadfin   IPTV proxy: turns M3U playlists and XMLTV guides into a tuner
+#               Plex's Live TV & DVR can use (threadfin.$TLD, behind authentik)
+#   streamlink  re-serves web streams (listed in config/streamlink/streams.yaml)
+#               as plain HTTP streams, one port each in 46200-46250, for
+#               threadfin's playlists and any player on the LAN
+#   warp        Cloudflare WARP, as a SOCKS5 proxy (warp:1080) for the streams
+#               that need a different exit (streamlink uses it for ok.ru)
+#
+# Plex runs on the host network, so it reaches threadfin at
+# http://127.0.0.1:34400 (published on this host only).
+
+services:
+  threadfin:
+    image: fyb3roptik/threadfin:latest
+    container_name: threadfin
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      TZ: ${TZ:-Pacific/Auckland}
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+    volumes:
+      - ./config/threadfin/conf:/home/threadfin/conf
+      - ./config/threadfin/tmp:/tmp/xteve
+    # For Plex (host network): the tuner and its guide, from this host only.
+    ports:
+      - "127.0.0.1:34400:34400"
+    networks:
+      - app-bridge
+    labels:
+      traefik.enable: true
+      traefik.http.services.threadfin.loadbalancer.server.port: 34400
+      traefik.http.routers.threadfin.rule: Host("threadfin.${TLD:?TLD is not set in .env (see .env.example)}")
+      traefik.http.routers.threadfin.entrypoints: web
+      traefik.http.routers.threadfin.service: threadfin
+      traefik.http.routers.threadfin.middlewares: threadfin
+      traefik.http.middlewares.threadfin.redirectscheme.scheme: https
+      traefik.http.routers.threadfin-https.rule: Host("threadfin.${TLD:?TLD is not set in .env (see .env.example)}")
+      traefik.http.routers.threadfin-https.entrypoints: websecure
+      traefik.http.routers.threadfin-https.service: threadfin
+      traefik.http.routers.threadfin-https.tls: true
+      traefik.http.routers.threadfin-https.middlewares: authentik@docker
+    restart: unless-stopped
+
+  streamlink:
+    build:
+      context: ./build/streamlink
+    image: irabelle/streamlink:local
+    container_name: streamlink
+    volumes:
+      # Per install: ./setup.sh creates it from streams.yaml.example.
+      - ./config/streamlink/streams.yaml:/config/streams.yaml:ro
+    # One port per stream (see streams.yaml), for players on the LAN.
+    ports:
+      - "46200-46250:46200-46250"
+    networks:
+      - app-bridge
+    depends_on:
+      - warp
+    restart: unless-stopped
+
+  warp:
+    image: caomingjun/warp:latest
+    container_name: warp
+    cap_add:
+      - NET_ADMIN
+    sysctls:
+      - net.ipv6.conf.all.disable_ipv6=0
+    volumes:
+      # The WARP registration, so it survives a recreate.
+      - ./config/warp:/var/lib/cloudflare-warp
+    networks:
+      - app-bridge
+    restart: unless-stopped
+
+networks:
+  app-bridge:
+    external: true
+    driver: bridge

@@ -172,7 +172,15 @@ trap 'rm -rf "$TMP"' EXIT
 # needs to declare TLD once, in the root .env.example, not repeat it.
 # ROOT_TLD is unset on the very first call (creating the root .env itself,
 # whose own .env.example has no @TLD@ to expand), hence the ":-".
-write_env_from() { sed -e "s|@REPO_DIR@|$REPO_DIR|g" -e "s|@TLD@|${ROOT_TLD:-}|g" "$1" >"$2"; }
+# @HOST_IP@ is this host's LAN address: the first global IPv4 address that is
+# not Docker's (its bridges, or the Docker VLAN host-vlan.sh creates — whose
+# address is where the default route goes, so "the default route's source" would
+# pick the wrong one on such a host).
+HOST_VLAN_IF=$( { sed -n 's/^[[:space:]]*DOCKER_VLAN_NAME[[:space:]]*=[[:space:]]*//p' host.env 2>/dev/null || true; } | tail -n1)
+HOST_IP=$(ip -4 -o addr show scope global 2>/dev/null \
+  | awk -v vlan="${HOST_VLAN_IF:-Docker.Online}" '$2 !~ /^(docker|br-|veth)/ && $2 != vlan {split($4, a, "/"); print a[1]; exit}')
+expand_env() { sed -e "s|@REPO_DIR@|$REPO_DIR|g" -e "s|@TLD@|${ROOT_TLD:-}|g" -e "s|@HOST_IP@|${HOST_IP:-}|g"; }
+write_env_from() { expand_env <"$1" >"$2"; }
 
 # In a .env.example, the literal value `change-me` means "generate one on first
 # setup". That way a fresh clone never runs with a published default password,
@@ -253,7 +261,7 @@ for s in "${STACKS[@]}"; do
       key=${line%%=*}
       grep -q "^[[:space:]]*$key[[:space:]]*=" "$s/.env" && continue
       [ "$added" = 1 ] || printf '\n# Added by ./setup.sh from .env.example:\n' >>"$s/.env"
-      printf '%s\n' "$line" | sed -e "s|@REPO_DIR@|$REPO_DIR|g" -e "s|@TLD@|${ROOT_TLD:-}|g" >>"$s/.env"
+      printf '%s\n' "$line" | expand_env >>"$s/.env"
       note "$s/.env: added $key"
       added=1
     done < <(grep -E '^[A-Za-z0-9_]+=' "$s/.env.example")
@@ -329,6 +337,21 @@ if [ -f "$DNSMASQ_CONF" ] && [ -n "$ROOT_TLD" ]; then
   fi
 fi
 
+# Zigbee2MQTT only starts with a coordinator to talk to (it is behind the
+# `zigbee` compose profile). Look for one once, by its stable by-id name, and
+# switch the profile on in smarthome/.env when there is. A path you set
+# yourself is left alone.
+if [ -f smarthome/.env ] && [ -z "$(env_var smarthome/.env ZIGBEE_DEVICE)" ]; then
+  zb=$(ls /dev/serial/by-id/ 2>/dev/null \
+       | grep -iE 'zigbee|sonoff|cc26|cc13|slzb|conbee|zbdongle|ezsp|efr32|skyconnect|home_assistant_connect' \
+       | head -n1 || true)
+  if [ -n "$zb" ]; then
+    sed -i -e "s|^ZIGBEE_DEVICE=.*|ZIGBEE_DEVICE=/dev/serial/by-id/$zb|" \
+           -e "s|^COMPOSE_PROFILES=.*|COMPOSE_PROFILES=zigbee|" smarthome/.env
+    note "smarthome/.env: Zigbee coordinator found ($zb) — Zigbee2MQTT will start"
+  fi
+fi
+
 # Per-install config, kept out of git so a `git pull` can never be blocked by a
 # local edit — the same deal as .env above. Each one ships as a committed
 # .example and is copied into place here: Traefik's static config, which people
@@ -336,7 +359,8 @@ fi
 # recurses or forwards to somebody else's resolver, and SearXNG's, which decides
 # what the meta-search engine exposes (notably the JSON API n8n calls).
 for f in traefik/config/traefik.yml adblock/config/unbound/unbound.conf \
-         searxng/config/searxng/config/settings.yml; do
+         searxng/config/searxng/config/settings.yml \
+         iptv/config/streamlink/streams.yaml; do
   [ -f "$f.example" ] || continue
   if [ -d "$f" ]; then
     # A file mount whose source was missing left Docker to create a *directory*
@@ -428,7 +452,10 @@ fi
 say "Bind mounts"
 PRE_CREATED=0
 for s in "${STACKS[@]}"; do
-  ( cd "$s" && docker compose config --format json ) >"$TMP/$s.json" 2>/dev/null || continue
+  # Every profile too: a service that is off for now (Zigbee2MQTT without a
+  # dongle) would otherwise get its directories invented by Docker, as root,
+  # the day it is switched on.
+  ( cd "$s" && docker compose --profile '*' config --format json ) >"$TMP/$s.json" 2>/dev/null || continue
   python3 - "$TMP/$s.json" "$REPO_DIR" >"$TMP/$s.dirs" <<'PY'
 import json, os, sys
 data = json.load(open(sys.argv[1]))
@@ -481,17 +508,16 @@ done
 # them yours — new files get it, and new subdirectories inherit it recursively —
 # without changing how any container runs and without hiding the data in a
 # volume. Needs the `acl` package; the warning below says so when it is absent.
-ACL_DIRS=(adblock/config/pihole dockhand/config/dockhand traefik/config/logs
-          downloads
-          arr/config books/config plex/config searxng/config n8n/config
-          pocket-tts2/config)
+# Every stack's config/ — so a stack added later is covered with no edit here —
+# plus the few runtime directories outside one, and the media tree.
+ACL_DIRS=(traefik/config/logs downloads)
+for s in "${STACKS[@]}"; do [ -d "$s/config" ] && ACL_DIRS+=("$s/config"); done
 # The second pass below walks every *existing* file, so it is deliberately
-# limited to the small config directories. Running it over downloads/ would mean
+# limited to the config directories. Running it over downloads/ would mean
 # traversing a media library that can hold terabytes, only to set an ACL that new
 # files inherit anyway.
-ACL_RECURSIVE_DIRS=(adblock/config/pihole dockhand/config/dockhand
-                    traefik/config/logs arr/config books/config plex/config
-                    searxng/config n8n/config pocket-tts2/config)
+ACL_RECURSIVE_DIRS=()
+for d in "${ACL_DIRS[@]}"; do [ "$d" = downloads ] || ACL_RECURSIVE_DIRS+=("$d"); done
 if command -v setfacl >/dev/null 2>&1; then
   for d in "${ACL_DIRS[@]}"; do
     [ -d "$REPO_DIR/$d" ] || continue
@@ -500,8 +526,12 @@ if command -v setfacl >/dev/null 2>&1; then
   done
   for d in "${ACL_RECURSIVE_DIRS[@]}"; do
     [ -d "$REPO_DIR/$d" ] || continue
-    # Existing entries too, where they are already yours to change.
+    # Existing entries too, where they are already yours to change — and the
+    # default ACL on every existing subdirectory, not just the top: a default
+    # only reaches directories created after it (pihole/, say, is not).
     setfacl -R -m "u:$(id -un):rwX" "$REPO_DIR/$d" 2>/dev/null || true
+    find "$REPO_DIR/$d" -type d -user "$(id -un)" \
+      -exec setfacl -m "d:u:$(id -un):rwX" -m "d:m:rwX" {} + 2>/dev/null || true
   done
 else
   warn "setfacl not found: files a container writes under downloads/ or any"

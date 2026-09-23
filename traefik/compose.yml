@@ -14,7 +14,7 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     labels:
       traefik.enable: true
-      traefik.http.routers.traefik.rule: Host("traefik") || Host("traefik.${TLD:?TLD is not set in .env (see .env.example)}")
+      traefik.http.routers.traefik.rule: Host("traefik.${TLD:?TLD is not set in .env (see .env.example)}")
       traefik.http.routers.traefik.service: api@internal
       traefik.http.routers.traefik.entrypoints: web
       traefik.http.services.traefik.loadbalancer.server.port: 8080
@@ -22,10 +22,26 @@ services:
       traefik.http.middlewares.traefik.redirectScheme.scheme: https
       traefik.http.routers.traefik.observability.accesslogs: false
 
-      traefik.http.routers.traefik-https.rule: Host("traefik") || Host("traefik.${TLD:?TLD is not set in .env (see .env.example)}")
+      # The dashboard, behind authentik.
+      traefik.http.routers.traefik-https.rule: Host("traefik.${TLD:?TLD is not set in .env (see .env.example)}")
       traefik.http.routers.traefik-https.entrypoints: websecure
+      traefik.http.routers.traefik-https.service: traefik
       traefik.http.routers.traefik-https.tls: true
+      traefik.http.routers.traefik-https.middlewares: authentik@docker
       traefik.http.routers.traefik-https.observability.accesslogs: false
+
+      # The bare name, without authentik, for cert-watcher.sh on this host
+      # (https://localhost with Host: traefik): it reads the router list from
+      # the API to know which certificates to issue, and must keep working
+      # while authentik is down. Only this host and its containers get in —
+      # the allowlist turns a LAN client sending the same header away.
+      traefik.http.routers.traefik-local.rule: Host("traefik")
+      traefik.http.routers.traefik-local.entrypoints: websecure
+      traefik.http.routers.traefik-local.service: traefik
+      traefik.http.routers.traefik-local.tls: true
+      traefik.http.routers.traefik-local.middlewares: traefik-local-only
+      traefik.http.routers.traefik-local.observability.accesslogs: false
+      traefik.http.middlewares.traefik-local-only.ipallowlist.sourcerange: 127.0.0.1/32,::1/128,172.16.0.0/12
     networks:
       default: {}
       app-bridge:

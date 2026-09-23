@@ -1,0 +1,40 @@
+# monitoring — Glances: CPU, memory, disks, sensors and containers, live, at
+# glances.$TLD behind authentik.
+#
+# On the host network with the host's process table, which is what lets it
+# see the machine rather than just its own container. Its web server is bound
+# to the Docker bridge's gateway address (the one host.docker.internal points
+# at, where Traefik reaches it), not to every interface — so the LAN cannot
+# bypass authentik on :61208.
+
+services:
+  glances:
+    image: nicolargo/glances:latest-full
+    container_name: glances
+    network_mode: host
+    pid: host
+    # Hardware sensors and every disk.
+    privileged: true
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      TZ: ${TZ:-Pacific/Auckland}
+      GLANCES_OPT: -w --bind ${DOCKER_GATEWAY_IP:-172.17.0.1}
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    labels:
+      traefik.enable: true
+      traefik.http.services.glances.loadbalancer.server.port: 61208
+      traefik.http.routers.glances.rule: Host("glances.${TLD:?TLD is not set in .env (see .env.example)}")
+      traefik.http.routers.glances.entrypoints: web
+      traefik.http.routers.glances.service: glances
+      traefik.http.routers.glances.middlewares: glances
+      traefik.http.middlewares.glances.redirectscheme.scheme: https
+      traefik.http.routers.glances-https.rule: Host("glances.${TLD:?TLD is not set in .env (see .env.example)}")
+      traefik.http.routers.glances-https.entrypoints: websecure
+      traefik.http.routers.glances-https.service: glances
+      traefik.http.routers.glances-https.tls: true
+      traefik.http.routers.glances-https.middlewares: authentik@docker
+    restart: unless-stopped

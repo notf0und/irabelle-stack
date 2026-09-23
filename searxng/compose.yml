@@ -61,16 +61,20 @@ services:
       - searxng-redis
     labels:
       traefik.enable: true
-      traefik.http.routers.searxng.rule: Host("searxng") || Host("searxng.${TLD:?TLD is not set in .env (see .env.example)}")
+      traefik.http.routers.searxng.rule: Host("searxng.${TLD:?TLD is not set in .env (see .env.example)}")
       traefik.http.routers.searxng.entrypoints: web
       traefik.http.routers.searxng.service: searxng
       traefik.http.routers.searxng.middlewares: searxng
       traefik.http.services.searxng.loadbalancer.server.port: 8080
       traefik.http.middlewares.searxng.redirectscheme.scheme: https
 
-      traefik.http.routers.searxng-https.rule: Host("searxng") || Host("searxng.${TLD:?TLD is not set in .env (see .env.example)}")
+      traefik.http.routers.searxng-https.rule: Host("searxng.${TLD:?TLD is not set in .env (see .env.example)}")
       traefik.http.routers.searxng-https.entrypoints: websecure
+      traefik.http.routers.searxng-https.service: searxng
       traefik.http.routers.searxng-https.tls: true
+      # The search page, behind authentik. Apps that search (n8n) call
+      # http://searxng:8080 over app-bridge instead, and skip it.
+      traefik.http.routers.searxng-https.middlewares: authentik@docker
     restart: unless-stopped
 
   searxng-redis:

@@ -1,0 +1,51 @@
+# ai — Ollama: local LLMs behind one API.
+#
+# Other containers use it at http://ollama:11434 (n8n, Open WebUI), and Home
+# Assistant — on the host network — at http://127.0.0.1:11434. The API has no
+# login of its own, so it is published on this host only, and ollama.$TLD is
+# behind authentik entirely: nothing on the LAN gets to it without one.
+#
+# Models are pulled on demand (`docker exec ollama ollama pull llama3.2`) into
+# config/ollama/models. They are big and read in one go when loaded, so the
+# models folder is kept out of config/ proper: see the volumes.
+
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      TZ: ${TZ:-Pacific/Auckland}
+      OLLAMA_HOST: 0.0.0.0:11434
+      OLLAMA_MODELS: /models
+    volumes:
+      - ./config/ollama:/root/.ollama
+      # Models: several GB each, in models/ rather than config/, so a fast
+      # disk (fast-disk.sh moves config/) is not filled with them.
+      - ./models:/models
+    # For Home Assistant and anything else on this host's network.
+    ports:
+      - "127.0.0.1:11434:11434"
+    networks:
+      - app-bridge
+    labels:
+      traefik.enable: true
+      traefik.http.services.ollama.loadbalancer.server.port: 11434
+      traefik.http.routers.ollama.rule: Host("ollama.${TLD:?TLD is not set in .env (see .env.example)}")
+      traefik.http.routers.ollama.entrypoints: web
+      traefik.http.routers.ollama.service: ollama
+      traefik.http.routers.ollama.middlewares: ollama
+      traefik.http.middlewares.ollama.redirectscheme.scheme: https
+      traefik.http.routers.ollama-https.rule: Host("ollama.${TLD:?TLD is not set in .env (see .env.example)}")
+      traefik.http.routers.ollama-https.entrypoints: websecure
+      traefik.http.routers.ollama-https.service: ollama
+      traefik.http.routers.ollama-https.tls: true
+      traefik.http.routers.ollama-https.middlewares: authentik@docker
+    restart: unless-stopped
+
+networks:
+  app-bridge:
+    external: true
+    driver: bridge

@@ -121,7 +121,9 @@ services:
       N8N_SANDBOX_SERVICE_API_KEY: ${SANDBOX_API_KEYS:?SANDBOX_API_KEYS is unset - set it in n8n/.env (see .env.example)}
       # The standalone searxng stack, for the assistant's web search. Traefik
       # routes it over HTTPS, which is why the container also gets the root CA.
-      N8N_INSTANCE_AI_SEARXNG_URL: https://searxng.${TLD:?TLD is not set in .env (see .env.example)}
+      # Straight to the container over app-bridge: searxng.$TLD is behind
+      # authentik, which a server-side search cannot pass.
+      N8N_INSTANCE_AI_SEARXNG_URL: http://searxng:8080
       # Behind Traefik, per the n8n reverse-proxy docs.
       N8N_WEBHOOK_URL: https://n8n.${TLD:?TLD is not set in .env (see .env.example)}/
       N8N_PROXY_HOPS: "1"
@@ -144,16 +146,26 @@ services:
       # may pick the internal one (172.x) it cannot route to and every request
       # 504s.
       traefik.docker.network: app-bridge
-      traefik.http.routers.n8n.rule: Host("n8n") || Host("n8n.${TLD:?TLD is not set in .env (see .env.example)}")
+      traefik.http.routers.n8n.rule: Host("n8n.${TLD:?TLD is not set in .env (see .env.example)}")
       traefik.http.routers.n8n.entrypoints: web
       traefik.http.routers.n8n.service: n8n
       traefik.http.routers.n8n.middlewares: n8n
       traefik.http.services.n8n.loadbalancer.server.port: 5678
       traefik.http.middlewares.n8n.redirectscheme.scheme: https
 
-      traefik.http.routers.n8n-https.rule: Host("n8n") || Host("n8n.${TLD:?TLD is not set in .env (see .env.example)}")
+      traefik.http.routers.n8n-https.rule: Host("n8n.${TLD:?TLD is not set in .env (see .env.example)}")
       traefik.http.routers.n8n-https.entrypoints: websecure
+      traefik.http.routers.n8n-https.service: n8n
       traefik.http.routers.n8n-https.tls: true
+      # The editor, behind authentik (and n8n's own login after it).
+      traefik.http.routers.n8n-https.middlewares: authentik@docker
+      # What other systems call — webhooks, forms and MCP triggers — skips
+      # authentik: callers cannot log in, and each of those carries its own
+      # secret path or credentials.
+      traefik.http.routers.n8n-hooks.rule: Host("n8n.${TLD:?TLD is not set in .env (see .env.example)}") && (PathPrefix("/webhook") || PathPrefix("/form") || PathPrefix("/mcp"))
+      traefik.http.routers.n8n-hooks.entrypoints: websecure
+      traefik.http.routers.n8n-hooks.service: n8n
+      traefik.http.routers.n8n-hooks.tls: true
     restart: unless-stopped
     # No host port is published: n8n is reachable through Traefik only. For
     # localhost testing without DNS, temporarily add: ports: ["5678:5678"]

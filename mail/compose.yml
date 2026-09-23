@@ -1,0 +1,46 @@
+# mail — Mailpit: an SMTP server that keeps every message it receives, with a
+# web UI to read them at mailpit.$TLD (behind authentik).
+#
+# Give any app or device that sends mail (alerts, notifications, "forgot
+# password") this host on port 1025, or mailpit:1025 from another container,
+# no login. Relaying on to a real mailbox is optional: see .env.example.
+
+services:
+  mailpit:
+    image: axllent/mailpit:latest
+    container_name: mailpit
+    user: "${PUID:-1000}:${PGID:-1000}"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      TZ: ${TZ:-Pacific/Auckland}
+      MP_DATABASE: /data/mailpit.db
+      MP_SMTP_AUTH_ACCEPT_ANY: "true"
+      MP_SMTP_AUTH_ALLOW_INSECURE: "true"
+    volumes:
+      - ./config/mailpit:/data
+    # SMTP for the LAN (devices send mail here).
+    ports:
+      - "1025:1025"
+    networks:
+      - app-bridge
+    labels:
+      traefik.enable: true
+      traefik.http.services.mailpit.loadbalancer.server.port: 8025
+      traefik.http.routers.mailpit.rule: Host("mailpit.${TLD:?TLD is not set in .env (see .env.example)}")
+      traefik.http.routers.mailpit.entrypoints: web
+      traefik.http.routers.mailpit.service: mailpit
+      traefik.http.routers.mailpit.middlewares: mailpit
+      traefik.http.middlewares.mailpit.redirectscheme.scheme: https
+      traefik.http.routers.mailpit-https.rule: Host("mailpit.${TLD:?TLD is not set in .env (see .env.example)}")
+      traefik.http.routers.mailpit-https.entrypoints: websecure
+      traefik.http.routers.mailpit-https.service: mailpit
+      traefik.http.routers.mailpit-https.tls: true
+      traefik.http.routers.mailpit-https.middlewares: authentik@docker
+    restart: unless-stopped
+
+networks:
+  app-bridge:
+    external: true
+    driver: bridge

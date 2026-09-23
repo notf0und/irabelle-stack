@@ -88,6 +88,20 @@ want and ignore the rest.
 │       ├── start_services.sh        # entrypoint: Wyoming + OpenAI API
 │       ├── wyoming_server.py
 │       └── openai_api.py
+├── smarthome/
+│   ├── compose.yml                  # Home Assistant, MariaDB, Mosquitto, Zigbee2MQTT,
+│   │                                # ESPHome, VoiceBM
+│   ├── .env.example                 # generated passwords, HOST_IP, Zigbee dongle
+│   ├── mosquitto.conf               # MQTT broker config (login from .env)
+│   ├── scripts/homeassistant-entrypoint.sh   # trust our CA, wait for the DB
+│   └── build/voicebm/               # built here, not pulled
+├── iptv/
+│   ├── compose.yml                  # Threadfin, streamlink, Cloudflare WARP
+│   ├── build/streamlink/            # built here, with its custom plugin
+│   └── config/streamlink/streams.yaml.example   # per-install; setup.sh copies it
+├── monitoring/compose.yml           # Glances
+├── mail/                            # Mailpit (SMTP catcher, optional relay)
+├── ai/compose.yml                   # Ollama; models in ai/models/, not config/
 └── downloads/                       # media tree shared by arr, books and plex,
     ├── movies/                      #   at /data/downloads in every container
     ├── tv/                          #   → libraries — data, not in git
@@ -122,6 +136,11 @@ stacks, each deployed the same way — pick it in Dockhand:
 | `searxng` | SearXNG and its Valkey | `searxng.$TLD` |
 | `n8n` | n8n and its sandboxed code-execution cluster | `n8n.$TLD` |
 | `pocket-tts2` | Pocket TTS 2.1.0 for the Home Assistant voice pipeline | host ports 10215/10216 — see below |
+| `smarthome` | Home Assistant and its MariaDB, Mosquitto, Zigbee2MQTT, ESPHome, VoiceBM | `homeassistant.$TLD`, `zigbee2mqtt.$TLD`, `esphome.$TLD`, `voicebm.$TLD` — see [Smart home](#smart-home) |
+| `iptv` | Threadfin (IPTV tuner for Plex), streamlink, Cloudflare WARP | `threadfin.$TLD`; streams on ports 46200-46250 |
+| `monitoring` | Glances | `glances.$TLD` |
+| `mail` | Mailpit | `mailpit.$TLD`; SMTP on port 1025 |
+| `ai` | Ollama | `ollama.$TLD` (behind authentik); `127.0.0.1:11434` on the host |
 
 `arr`, `books` and `plex` all reach into the shared `downloads/` tree at the repo
 root, mounted whole at the same path — `/data/downloads` — in every container.
@@ -543,6 +562,9 @@ repo root does not know about, so their panels need these:
 | `searxng` | `TLD`, `TZ`, `SEARXNG_SECRET` |
 | `n8n` | `TLD`, `TZ`, `PUID`, `PGID`, `SANDBOX_API_KEYS`, `SANDBOX_API_RUNNER_REGISTRATION_TOKEN`, `SANDBOX_API_RUNNER_API_KEY` |
 | `pocket-tts2` | `TLD`, `TZ`, `PUID`, `PGID`, and optionally `HF_TOKEN` |
+| `smarthome` | `TLD`, `TZ`, `PUID`, `PGID`, `HOST_IP`, `HA_DB_PASSWORD`, `HA_DB_ROOT_PASSWORD`, `MQTT_PASSWORD`, and for Zigbee `ZIGBEE_DEVICE` + `COMPOSE_PROFILES=zigbee` |
+| `mail` | `TLD`, `TZ`, `PUID`, `PGID`, and optionally the `MP_*` relay/webhook settings |
+| `iptv`, `monitoring`, `ai` | `TLD`, `TZ`, `PUID`, `PGID` — inherited from the repo root |
 
 For the two that carry generated secrets — `searxng` (`SEARXNG_SECRET`) and `n8n`
 (the three sandbox values) — `setup.sh` fills them in from the literal
@@ -642,6 +664,27 @@ How each service is wired:
   address is unaffected. If authentik is down, `pihole.<TLD>` answers 404
   rather than letting anyone in.
 
+**The rule: every web UI is behind authentik.** Either the app logs in through
+it over OIDC (Dockhand, Kavita, Shelfmark, Cleanuparr), or Traefik's
+`authentik@docker` middleware stands in front of it (everything else with a UI:
+the *arrs, Transmission, Calibre and Calibre-Web, Zigbee2MQTT, ESPHome, VoiceBM,
+Threadfin, Glances, Mailpit, Ollama, SearXNG, n8n, Pi-hole, and Traefik's own
+dashboard). The exceptions, and why:
+
+| Not behind authentik | Why | Protected by |
+| --- | --- | --- |
+| Home Assistant | its companion apps and devices cannot do a web login | its own login |
+| Plex | the Plex apps sign in with your Plex account | Plex's login |
+| `/api` on Sonarr, Radarr, Prowlarr, Bazarr | called by phone apps and Home Assistant | the API key |
+| n8n `/webhook*`, `/form*`, `/mcp*` | called by other systems | their own secret path or credentials |
+| Calibre-Web `/opds`, `/kobo` | e-readers | Calibre-Web's password |
+| the bare `traefik` name | `cert-watcher.sh` reads the router list there | only this host and Docker's networks (172.16/12) get in |
+
+A few services listen on the host network, where Traefik is not in the way:
+Glances and VoiceBM's dashboard are bound to the Docker bridge address only, so
+the LAN cannot reach them around authentik; VoiceBM's audio and speech ports
+stay on the LAN for Home Assistant and your speakers.
+
 To put another service behind the login the same way, add
 `authentik@docker` to its router's middlewares, then add a `forward_single`
 proxy provider and application for it to the blueprint — and the provider
@@ -651,6 +694,41 @@ authentik also always has its own built-in `akadmin` account. You do not use
 it, but it is given a generated password (`AUTHENTIK_BOOTSTRAP_PASSWORD`),
 because an `akadmin` without one leaves authentik's first-run setup page open
 to anyone on the LAN.
+
+## Smart home
+
+The `smarthome` stack is Home Assistant with what it usually needs next to it.
+Deploy it from Dockhand, then run `./integrations.py` (the update cron job does
+it too, within 12 hours):
+
+* **Home Assistant keeps its own login** — no authentik in front, because its
+  companion apps and devices cannot do that login. `integrations.py` creates the
+  owner account with your authentik username and password (so there is no
+  first-run wizard), tells it to trust Traefik's forwarded headers (without that
+  `homeassistant.<TLD>` answers 400), points its history at the stack's MariaDB,
+  and connects its MQTT integration to Mosquitto.
+* **MQTT has a real login**, generated into `smarthome/.env` (`MQTT_USER`,
+  `MQTT_PASSWORD`) and applied at every start. Give your devices the same, and
+  this host's address on port 1883.
+* **Zigbee2MQTT starts only with a coordinator plugged in.** `setup.sh` looks
+  in `/dev/serial/by-id/` for a Zigbee dongle and, when it finds one, writes
+  `ZIGBEE_DEVICE` and `COMPOSE_PROFILES=zigbee` into `smarthome/.env`. Plug one
+  in later and re-run `./setup.sh`, or set both by hand.
+* **ESPHome is on `app-bridge`, not the host network**, so its dashboard (no
+  login of its own) is only reachable through authentik. Device status comes
+  from ping rather than mDNS; flashing over the air works as usual. Its build
+  cache (several GB) is in `smarthome/cache/`, so it stays off the fast disk.
+* **VoiceBM** (speaker recognition and speech-to-text for HA's voice pipeline)
+  is built from `smarthome/build/voicebm` on the first deploy and downloads its
+  models on the first start (about 500 MB with the defaults, set in
+  `smarthome/.env`). HA reaches its Wyoming proxy at `127.0.0.1:10301`.
+* **Host network:** Home Assistant and VoiceBM share the host's network stack,
+  so what they listen on is on the LAN. Home Assistant (8123) has its login.
+  VoiceBM's dashboard is patched at build time to listen on the Docker bridge
+  only, so `voicebm.<TLD>` (behind authentik) is the one way to it; its audio
+  server (9090) and Wyoming/transcription ports (10301/10302) stay on the LAN
+  for HA, cameras and speakers, and have no login — keep them off an untrusted
+  network.
 
 ## Media apps: wired together and behind authentik
 
@@ -981,6 +1059,9 @@ committed by accident:
 | `**/config/searxng/config/settings.yml` | per-install SearXNG config (`settings.yml.example` is committed) |
 | `**/config/{n8n,sandbox-tls}/*` | the workflow/credential database and the sandbox cluster's regenerated mTLS material |
 | `pocket-tts2/config/{models,voices}/*` | the TTS model and voice caches |
+| `**/config/{homeassistant,homeassistant-db,mosquitto,zigbee2mqtt,esphome,voicebm}/*`, `smarthome/cache/` | Home Assistant's config and history database, MQTT data, Zigbee network, ESPHome devices, VoiceBM's models and recordings; ESPHome's build cache |
+| `**/config/{threadfin,warp}/*`, `**/config/streamlink/streams.yaml` | IPTV playlists and buffer, the WARP registration, your stream list (`streams.yaml.example` is committed) |
+| `**/config/{mailpit,ollama}/*`, `ai/models/` | the mail store, Ollama's keys and its models |
 
 The patterns use `**/` so any stack added later is covered without touching
 `.gitignore`. Nothing generated is committed and no `.gitkeep` placeholders are
