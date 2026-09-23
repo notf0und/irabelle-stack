@@ -39,7 +39,8 @@
 #   9. hand this host's DNS back to the router if ~/manual-dns.sh shows a
 #      manual override active and adblock is actually running (not every
 #      install has this script — it's this bootstrapping problem's own
-#      escape hatch, see the block near the end of this file)
+#      escape hatch). This one runs right after step 4, before Dockhand, so
+#      steps 5 and 6 already use the host's real resolver.
 #
 # The URLs to open are printed last, not step 5 — see the end of this file.
 #
@@ -473,6 +474,66 @@ for s in "${STACKS[@]}"; do
   fi
 done
 
+# --- hand the host's DNS back to the router ----------------------------------
+# Bootstrapping a cold host needs *some* DNS before Pi-hole is up at all — the
+# git clone and docker pull this repo itself needs. manual-dns.sh (kept in the
+# home directory on purpose, outside this checkout) is this host's way around
+# that chicken-and-egg. Once adblock is actually running, hand the override
+# back: left in place, this host would keep ignoring the router's real
+# (Pi-hole) DNS from here on instead of going back to it as the router hands
+# it out over DHCP. The router's own config is not this repo's responsibility
+# — only whether *this host* still has a manual override active is.
+#
+# Done here, right after the stacks start and before Dockhand and single
+# sign-on, not at the end: everything from here on (Dockhand's own pull, its
+# login through authentik.$TLD) should see the resolver the host will
+# actually run with, not the temporary public one.
+MANUAL_DNS="$HOME/manual-dns.sh"
+if [ -x "$MANUAL_DNS" ]; then
+  # Captured first, matched second — not piped straight into `grep -q`. Under
+  # pipefail (set at the top of this script), `grep -q` exiting the instant it
+  # finds a match can SIGPIPE a still-writing upstream command (manual-dns.sh
+  # prints several more lines after the one this matches on), which then makes
+  # the whole pipeline look like it failed even though the match happened.
+  # Hit exactly that here during testing: this check silently never fired.
+  MANUAL_DNS_STATUS=$("$MANUAL_DNS" status 2>/dev/null || true)
+  DNS_OVERRIDDEN=no
+  case "$MANUAL_DNS_STATUS" in *8.8.8.8*) DNS_OVERRIDDEN=yes ;; esac
+  if [ "$DNS_OVERRIDDEN" = yes ] \
+     && [ -n "$(docker compose -f adblock/compose.yml ps --status running -q 2>/dev/null)" ]; then
+    say "Manual DNS override"
+    # "running" is not "answering": give Pi-hole's own healthcheck (a DNS
+    # query against itself) the chance to pass before relying on it.
+    printf '    waiting for pihole to answer'
+    for _ in $(seq 1 30); do
+      h=$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{end}}' pihole 2>/dev/null || true)
+      # No healthcheck at all (a future image): nothing to wait for.
+      [ "$h" = healthy ] || [ -z "$h" ] && break
+      printf '.'
+      sleep 2
+    done
+    printf '\n'
+    note "handing this host's resolver back to whatever the router provides"
+    note "over DHCP (pihole, per the router's own config):"
+    if "$MANUAL_DNS" off >/dev/null 2>&1; then
+      # The rest of this script still pulls images. If the handed-back
+      # resolver cannot resolve public names, put the override back rather
+      # than fail halfway — and say so, because that is a router or Pi-hole
+      # problem this script cannot fix.
+      if timeout 10 getent hosts github.com >/dev/null 2>&1; then
+        note "reverted — public names resolve through pihole"
+      else
+        warn "reverted, but public names do not resolve that way — the manual"
+        warn "override is back on. Check the router's DHCP DNS option and Pi-hole,"
+        warn "then run: $MANUAL_DNS off"
+        "$MANUAL_DNS" on >/dev/null 2>&1 || true
+      fi
+    else
+      warn "could not revert automatically — run it yourself: $MANUAL_DNS off"
+    fi
+  fi
+fi
+
 # --- 5. Dockhand -------------------------------------------------------------
 say "Dockhand"
 # --force-recreate because a re-cloned checkout is a *new* directory: a running
@@ -801,13 +862,20 @@ json.dump({
       # Asked from inside the dockhand container, with Node's own fetch: the
       # same DNS, CA and TLS stack Dockhand's login uses. (Dockhand's own
       # "Test" button wants a browser session, not the API token.)
-      if docker exec dockhand node -e '
-fetch(process.argv[1]).then(r => r.json()).then(d => process.exit(d.issuer ? 0 : 1)).catch(() => process.exit(1))' \
-           "https://authentik.$ROOT_TLD/application/o/dockhand/.well-known/openid-configuration" >/dev/null 2>&1; then
+      if OIDC_ERR=$(docker exec dockhand node -e '
+fetch(process.argv[1])
+  .then(r => r.ok ? r.json() : Promise.reject(new Error("HTTP " + r.status)))
+  .then(d => { if (!d.issuer) throw new Error("no issuer in the discovery document"); })
+  .catch(e => { console.log((e.cause && (e.cause.code || e.cause.message)) || e.message); process.exit(1); })' \
+           "https://authentik.$ROOT_TLD/application/o/dockhand/.well-known/openid-configuration" 2>&1); then
         note "Dockhand reaches authentik: sign-in with authentik works"
       else
-        note "Dockhand cannot reach authentik yet — normal on a first run, until"
-        note "authentik has started and https://authentik.$ROOT_TLD has its certificate."
+        # The reason matters: ENOTFOUND/EAI_AGAIN is DNS, a certificate code
+        # (UNABLE_TO_VERIFY_LEAF_SIGNATURE, ...) is the CA or a cert not yet
+        # issued, HTTP 404 is authentik still starting or its router missing.
+        note "Dockhand cannot reach authentik yet (${OIDC_ERR:-no answer}) — normal on"
+        note "a first run, until authentik has started and https://authentik.$ROOT_TLD"
+        note "has its certificate."
         note "Dockhand's authentication settings can re-run the check (Test) later."
         note "The local login ($AK_USER) works in the meantime."
       fi
@@ -955,40 +1023,6 @@ EOF
   note "Firefox keeps its own store regardless of the OS: set"
   note "security.enterprise_roots.enabled=true in about:config, or import"
   note "$CA_CRT under Settings -> Privacy & Security -> Certificates."
-fi
-
-# --- hand the host's DNS back to the router ----------------------------------
-# Bootstrapping a cold host needs *some* DNS before Pi-hole is up at all — the
-# git clone and docker pull this repo itself needs. manual-dns.sh (kept in the
-# home directory on purpose, outside this checkout) is this host's way around
-# that chicken-and-egg. Once adblock is actually running, hand the override
-# back: left in place, this host would keep ignoring the router's real
-# (Pi-hole) DNS from here on instead of going back to it as the router hands
-# it out over DHCP. The router's own config is not this repo's responsibility
-# — only whether *this host* still has a manual override active is.
-MANUAL_DNS="$HOME/manual-dns.sh"
-if [ -x "$MANUAL_DNS" ]; then
-  ADBLOCK_UP=no
-  [ -n "$(docker compose -f adblock/compose.yml ps --status running -q 2>/dev/null)" ] && ADBLOCK_UP=yes
-  # Captured first, matched second — not piped straight into `grep -q`. Under
-  # pipefail (set at the top of this script), `grep -q` exiting the instant it
-  # finds a match can SIGPIPE a still-writing upstream command (manual-dns.sh
-  # prints several more lines after the one this matches on), which then makes
-  # the whole pipeline look like it failed even though the match happened.
-  # Hit exactly that here during testing: this check silently never fired.
-  MANUAL_DNS_STATUS=$("$MANUAL_DNS" status 2>/dev/null || true)
-  DNS_OVERRIDDEN=no
-  case "$MANUAL_DNS_STATUS" in *8.8.8.8*) DNS_OVERRIDDEN=yes ;; esac
-  if [ "$ADBLOCK_UP" = yes ] && [ "$DNS_OVERRIDDEN" = yes ]; then
-    say "Manual DNS override"
-    note "pihole is up — handing this host's resolver back to whatever the"
-    note "router provides over DHCP (pihole, per the router's own config):"
-    if "$MANUAL_DNS" off; then
-      note "reverted"
-    else
-      warn "could not revert automatically — run it yourself: $MANUAL_DNS off"
-    fi
-  fi
 fi
 
 TRAEFIK_UP=no

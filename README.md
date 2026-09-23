@@ -263,7 +263,10 @@ work Dockhand cannot do for itself:
 9. if `~/manual-dns.sh` exists and shows a manual override active (this
    repo's own bootstrapping-before-Pi-hole-exists escape hatch, not
    something every install has), hand this host's DNS back to whatever the
-   router now provides — safe to skip if adblock isn't actually running yet;
+   router now provides — safe to skip if adblock isn't actually running yet.
+   This happens right after the stacks start, before Dockhand, once Pi-hole
+   answers; if public names then fail to resolve, the override is put back
+   and it tells you;
 10. print your login and the URLs to open last, as clickable hyperlinks —
     `https://dockhand.<TLD>` first, `ip:port` fallbacks after — so it works
     over SSH: clicking a hyperlink opens it in the browser on *your* machine,
