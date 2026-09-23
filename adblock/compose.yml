@@ -20,17 +20,10 @@
 
 services:
   unbound:
-    # :latest, with our own config mounted over the image's unbound.conf below —
-    # so what this resolver does is whatever config/unbound says, not whatever
-    # the image ships or changes to next.
     image: mvance/unbound:latest
     container_name: unbound
     restart: unless-stopped
     volumes:
-      # Replaces the image's config, which forwards every query to Cloudflare
-      # over DoT. Ours recurses from the root instead. Read-only: Unbound has
-      # nothing to write here (its DNSSEC trust anchor lives in the image and
-      # updates inside the container).
       - ./config/unbound/unbound.conf:/opt/unbound/etc/unbound/unbound.conf:ro
     networks:
       adblock:
@@ -41,36 +34,15 @@ services:
     container_name: pihole
     hostname: pihole
     restart: unless-stopped
-    # Optional, not required: on a git-based deploy (Dockhand and friends) the
-    # checkout has no .env, because it is gitignored — the values come from the
-    # stack's environment panel instead. Locally ./setup.sh creates it, and
-    # Compose auto-loads a file of exactly this name for interpolation anyway.
     env_file:
       - path: .env
         required: false
     environment:
       TZ: ${TZ:-Pacific/Auckland}
-      # Unbound, over the private bridge. A static address, not a name: FTL
-      # wants an address on this setting.
       FTLCONF_dns_upstreams: 10.77.40.6
-      # Default is "local", which refuses queries from other subnets. LAN
-      # clients are on 192.168.1.x asking 192.168.40.5, so this is required.
       FTLCONF_dns_listeningMode: all
-      # Pi-hole v6 only reads /etc/dnsmasq.d when this is on; the .smart
-      # wildcard below lives there. Verified against the station build, which
-      # sets etc_dnsmasq_d = true for exactly this reason.
       FTLCONF_misc_etc_dnsmasq_d: "true"
-      # No Pi-hole password: logging in is authentik's job. pihole.$TLD goes
-      # through Traefik's `authentik` middleware (the -https router below), so
-      # nobody reaches this UI without the authentik login, and nobody who has
-      # it is asked for a second password.
       FTLCONF_webserver_api_password: ""
-      # ...which only holds if Traefik is the *only* way in. Pi-hole also has a
-      # LAN address (192.168.40.5, for DNS), and its web server would answer
-      # there too, password-free. This ACL refuses every web client except
-      # localhost and app-bridge — where Traefik is. DNS is not affected.
-      # setup.sh writes app-bridge's subnet into adblock/.env; unset, only
-      # localhost gets in, so a forgotten value fails closed.
       FTLCONF_webserver_acl: "-0.0.0.0/0,-[::]/0,+127.0.0.1,+[::1],+${APP_BRIDGE_SUBNET:-127.0.0.1/32}"
     networks:
       app-macvlan:
@@ -78,14 +50,7 @@ services:
       app-bridge: {}
       adblock: {}
     volumes:
-      # One directory per service — this stack has two, so Pi-hole's things live
-      # under pihole/ and Unbound's under unbound/, rather than at config/ root.
-      # config/pihole *is* the container's /etc/pihole (database, blocklists,
-      # settings), with our dnsmasq drop-in nested inside it.
       - ./config/pihole:/etc/pihole
-      # Single file, not the whole directory: Pi-hole keeps its generated
-      # dnsmasq config inside the container, and a directory mount would drop
-      # that into the repo.
       - ./config/pihole/dnsmasq.d/99-irabelle.conf:/etc/dnsmasq.d/99-irabelle.conf:ro
     labels:
       traefik.enable: true
@@ -98,11 +63,6 @@ services:
       traefik.http.routers.pihole-https.rule: Host("pihole") || Host("pihole.${TLD:?TLD is unset - set it in adblock/.env or in the Dockhand stack environment panel}")
       traefik.http.routers.pihole-https.entrypoints: websecure
       traefik.http.routers.pihole-https.tls: true
-      # authentik first: nothing reaches Pi-hole, not even the redirect below,
-      # without logging in. The middleware is defined by the authentik stack;
-      # while that is not running Traefik refuses this router outright (404)
-      # rather than letting requests through unchecked.
-      # Pi-hole serves its UI only under /admin; send the bare host there.
       traefik.http.routers.pihole-https.middlewares: authentik@docker,pihole-admin
       traefik.http.middlewares.pihole-admin.redirectregex.regex: ^https?://([^/]+)/?$$
       traefik.http.middlewares.pihole-admin.redirectregex.replacement: https://$${1}/admin/
@@ -110,16 +70,10 @@ services:
 networks:
   app-macvlan:
     external: true
-    # Declared so ./setup.sh can see what this is: it asks compose for the
-    # resolved config, and an external network without a driver tells it
-    # nothing — it would otherwise assume a bridge and create the wrong thing.
     driver: macvlan
   app-bridge:
     external: true
     driver: bridge
-  # Private to this stack. The subnet is deliberate: Docker's default pool is
-  # 172.17-172.31, so a fixed address out here never collides with another
-  # stack's automatically-assigned network.
   adblock:
     name: adblock
     driver: bridge

@@ -3,46 +3,21 @@ services:
     image: fnsys/dockhand:latest
     container_name: dockhand
     env_file: .env
-    # Published on purpose. Dockhand is how you deploy everything else — Traefik
-    # included — so its `dockhand.$TLD` name cannot work yet at bootstrap time.
-    # This port is the chicken-and-egg escape hatch: reach it directly, deploy
-    # Traefik, and the nicer HTTPS name works from then on.
-    #
-    # It also bypasses Traefik's TLS and any middleware, so make sure
-    # authentication is enabled (Settings -> Authentication). setup.sh warns if
-    # it is not.
     ports:
       - "${DOCKHAND_PORT:-3000}:3000"
     environment:
-      # "Matching paths": Dockhand runs `docker compose` inside this container,
-      # so a relative bind mount in a stack (./config/foo) resolves to an
-      # absolute path *inside the container* — and the host daemon then looks
-      # for that same path on the host. If the two differ, Docker silently
-      # creates the path, empty; a missing *file* mount even becomes a
-      # directory. Mounting the checkout at the same path on both sides is what
-      # makes relative mounts work. setup.sh fills STACK_ROOT in from
-      # @REPO_DIR@ in dockhand/.env.example.
       DATA_DIR: ${STACK_ROOT:?STACK_ROOT is unset - run ./setup.sh, or set it in dockhand/.env}/dockhand/config/dockhand
-      # Single sign-on: Dockhand fetches authentik's discovery document, and
-      # exchanges the login code for a token, itself — server-side, over
-      # https://authentik.$TLD, whose certificate our own root CA signed. The
-      # CA is already inside the container (the checkout is mounted below);
-      # this makes Node trust it. A missing file only logs a warning.
       NODE_EXTRA_CA_CERTS: ${STACK_ROOT}/traefik/generate_certificates/root-certificates/root-ca.crt
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - /etc/localtime:/etc/localtime:ro
       - /etc/timezone:/etc/timezone:ro
       - ${STACK_ROOT:?STACK_ROOT is unset - run ./setup.sh, or set it in dockhand/.env}:${STACK_ROOT}
-      # Legacy: the pre-matching-paths layout. Anything already imported from
-      # this path keeps working; drop it once the stacks have been re-imported
-      # from the path above.
       - ../:/app/data/stacks/irabelle
     networks:
       - app-bridge
     labels:
       traefik.enable: true
-      # TLD comes from .env (see .env.example). Compose fails fast if it is unset.
       traefik.http.routers.dockhand.rule: Host("dockhand") || Host("dockhand.${TLD:?TLD is not set in .env (see .env.example)}")
       traefik.http.routers.dockhand.entrypoints: web
       traefik.http.routers.dockhand.service: dockhand
