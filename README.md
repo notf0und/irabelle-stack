@@ -54,6 +54,8 @@ want and ignore the rest.
 │           ├── unbound.conf.example     # recursive resolver; setup.sh copies it
 │           └── unbound.conf             # your copy — not in git
 ├── integrations.py                  # wires the media apps together (run by setup.sh)
+├── fast-disk.sh                     # keeps every config/ on an SSD, same paths (sudo)
+├── ADDING-A-STACK.md                # step by step, for a new stack
 ├── arr/
 │   ├── compose.yml                  # Sonarr, Radarr, Prowlarr, Bazarr, Lingarr,
 │   │                                # Cleanuparr, Byparr, Transmission
@@ -319,7 +321,10 @@ work Dockhand cannot do for itself:
    and copied into every stack (a stack shipping its own `.env.example` uses
    that instead, so it can carry extra variables);
 2. create the shared `app-bridge` network Dockhand attaches to;
-3. generate the root CA behind the `*.$TLD` certificates;
+3. generate the root CA behind the `*.$TLD` certificates; then, if this
+   checkout is on a slow (spinning or USB) disk, offer to keep every stack's
+   `config/` — its settings and databases — on an SSD instead (see
+   [Configs and databases on a fast disk](#configs-and-databases-on-a-fast-disk));
 4. start the **base stacks** — traefik, adblock, authentik and Dockhand —
    so `https://<service>.<TLD>`, the login and Dockhand work right after
    this script finishes. adblock needs `app-macvlan`, so it only starts once
@@ -395,6 +400,46 @@ hand instead, it is just compose:
 ```sh
 docker compose -f traefik/compose.yml up -d
 ```
+
+### Configs and databases on a fast disk
+
+This checkout usually lives on the big disk the media needs, and that disk is
+often a USB or spinning one. Left there, every database here waits on it:
+Home Assistant's history, Plex, the *arrs, Pi-hole all slow down together, and
+a finished download that is being written to the same disk makes it worse.
+Moving just their state to an SSD fixes that — measured on station, the USB
+disk went from constantly busy to idle, and Home Assistant history loads
+almost instantly.
+
+`setup.sh` does it for you. On its first run, when it sees the checkout on a
+slow disk, it lists the SSDs it could use and asks; the answer is kept in
+`host.env` (`FAST_DATA_DIR`). From then on every run keeps it up to date —
+including for stacks added later:
+
+```sh
+./setup.sh                          # asks, once
+./setup.sh --fast-disk /home/irabelle-stack-data   # or say where up front
+./setup.sh --no-fast-disk           # keep them here, and stop asking
+./fast-disk.sh status               # where each <stack>/config is now
+```
+
+What `fast-disk.sh` does, per stack: copy `<stack>/config` to
+`FAST_DATA_DIR/<stack>/config` (first while everything runs, then again during
+one short stop), bind-mount that copy back over `<stack>/config`, and add the
+mount to `/etc/fstab`. **Every path stays the same** — in compose files, in
+Dockhand, in your shell. Docker is made to wait for those mounts at boot, so
+nothing ever starts against the old copy underneath them. Only `config/`
+moves: `downloads/` stays on the big disk, where large sequential reads and
+writes are what it does well.
+
+**Before you delete or re-clone the checkout, release the fast disk first:**
+
+```sh
+sudo ./fast-disk.sh release
+```
+
+That copies everything back into the checkout and removes the mounts and fstab
+lines. Skip it and `rm -rf` reaches through the mounts into the SSD copy.
 
 ### Starting and stopping everything
 
@@ -899,36 +944,13 @@ Service names are resolved as described in [Name resolution](#name-resolution).
 
 ## Adding a stack or a service
 
-**A new stack** is a directory with a `compose.yml` and (optionally) its own
-`.env`, copied from the root one by `setup.sh`. Join the `app-bridge` network
-and publish routers under `${TLD}`:
-
-```yaml
-services:
-  myservice:
-    image: example/myservice
-    networks: [app-bridge]
-    labels:
-      traefik.enable: true
-      traefik.http.routers.myservice.rule: Host("myservice.${TLD}")
-      traefik.http.routers.myservice.entrypoints: web
-      traefik.http.routers.myservice.middlewares: myservice
-      traefik.http.middlewares.myservice.redirectScheme.scheme: https
-      traefik.http.routers.myservice-https.rule: Host("myservice.${TLD}")
-      traefik.http.routers.myservice-https.entrypoints: websecure
-      traefik.http.routers.myservice-https.tls: true
-
-networks:
-  app-bridge:
-    external: true
-```
-
-`cert-watcher.sh` notices the new container and issues its certificate within a
-few seconds. A stack that declares `external: true` cannot create the network
-itself, so `setup.sh` creates a plain bridge network before starting anything
-that expects it. A **macvlan** network is different — that one needs the host
-VLAN and is created by `host-vlan.sh`, so `setup.sh` stops with an instruction
-rather than substituting a bridge.
+**[ADDING-A-STACK.md](ADDING-A-STACK.md)** is the step-by-step: the
+`compose.yml` template, `.env.example`, where state goes, the authentik login
+(OIDC or forward auth), wiring it to the other apps in `integrations.py`, and
+deploying it. In short: a directory with a `compose.yml` is a stack, and every
+script here picks it up on its own; state goes in its `config/`, it joins
+`app-bridge`, it is published as `<name>.<TLD>` behind authentik, and it is
+deployed from Dockhand.
 
 ## Repository hygiene
 

@@ -9,6 +9,8 @@
 #                               own trust store (done by default; sudo —
 #                               every client device still needs its own
 #                               one-time step regardless)
+#   ./setup.sh --fast-disk DIR  keep configs and databases on DIR (an SSD),
+#                               at the same paths (see fast-disk.sh)
 #   ./setup.sh --no-mount-guard skip telling Docker to wait for this
 #                               checkout's filesystem at boot, if it is on a
 #                               separate mount (done by default when it is;
@@ -21,6 +23,8 @@
 #   1. the .env files the stacks read (gitignored, so never in the repo)
 #   2. the shared app-bridge network Dockhand attaches to
 #   3. the root CA behind the *.$TLD certificates
+#   3b. if this checkout is on a slow (spinning or USB) disk: every stack's
+#      config/ onto an SSD you pick, bind-mounted back in place (fast-disk.sh)
 #   4. the base stacks — traefik, adblock (once host-vlan.sh has run),
 #      authentik and Dockhand — so https://<service>.$TLD, the login and
 #      Dockhand already work once this script finishes. Everything else (arr,
@@ -62,6 +66,7 @@ DOCKHAND_PORT=${DOCKHAND_PORT:-3000}
 CRON_MODE=yes
 TRUST_CA=yes
 MOUNT_GUARD=yes
+FAST_DISK_OPT=
 
 usage() {
   cat <<'EOF'
@@ -81,6 +86,11 @@ Usage: ./setup.sh [options]
                     mount (needs sudo; a no-op if it's on the root
                     filesystem, or if Docker is already configured to
                     wait for it)
+  --fast-disk DIR   keep every stack's config/ (settings, databases) in DIR,
+                    on a faster disk, bind-mounted back at the same paths
+                    (needs sudo; asked for on the first run when this checkout
+                    is on a slow disk — see fast-disk.sh)
+  --no-fast-disk    keep them in the checkout, and stop asking
   -h, --help        this text
 
 Environment:
@@ -103,6 +113,8 @@ while [ $# -gt 0 ]; do
     --no-trust-ca) TRUST_CA=no ;;
     --mount-guard) MOUNT_GUARD=yes ;;
     --no-mount-guard) MOUNT_GUARD=no ;;
+    --fast-disk) shift; FAST_DISK_OPT=${1:?--fast-disk needs a directory} ;;
+    --no-fast-disk) FAST_DISK_OPT=none ;;
     -h|--help) usage 0 ;;
     *) echo "Unknown option: $1" >&2; usage 2 ;;
   esac
@@ -502,6 +514,105 @@ fi
 if find "$REPO_DIR" -path "$REPO_DIR/.git" -prune -o -user root -print -quit 2>/dev/null | grep -q .; then
   warn "root-owned paths already exist in this checkout (from an earlier run)"
   warn "clear them once with: sudo chown -R $(id -un) '$REPO_DIR'"
+fi
+
+# --- fast disk for configs and databases ---------------------------------------
+# This checkout usually lives on the big disk the media needs — often a USB or
+# spinning one. Every stack's config/ (its databases: Home Assistant's history,
+# Plex, the *arrs, Pi-hole) is small, and on such a disk everything waits on it.
+# fast-disk.sh keeps those folders on an SSD instead, bind-mounted back at the
+# same paths, while downloads/ stays here. Asked for once; the answer is kept in
+# host.env as FAST_DATA_DIR ("none" = do not ask again). Every run re-applies
+# it, so a stack added later gets its config/ moved too.
+host_env_get() { env_var host.env "$1"; }
+host_env_set() {
+  [ -f host.env ] || printf '# Host-level settings — see host.env.example.\n' >host.env
+  if grep -q "^[[:space:]]*$1[[:space:]]*=" host.env; then
+    sed -i "s|^[[:space:]]*$1[[:space:]]*=.*|$1=$2|" host.env
+  else
+    printf '%s=%s\n' "$1" "$2" >>host.env
+  fi
+}
+
+[ -n "$FAST_DISK_OPT" ] && host_env_set FAST_DATA_DIR "$FAST_DISK_OPT"
+FAST_DATA_DIR=$(host_env_get FAST_DATA_DIR)
+
+if [ -z "$FAST_DATA_DIR" ]; then
+  # The disks worth offering: SSDs other than the one this checkout is on, and
+  # only when this checkout is on a slow one. "slow" = spinning or USB.
+  python3 - "$REPO_DIR" >"$TMP/disks" <<'PY' || true
+import json, os, subprocess, sys
+repo = sys.argv[1]
+def disk_of(dev):
+    out = subprocess.run(["lsblk", "-ndo", "PKNAME", dev], capture_output=True, text=True).stdout.strip()
+    return "/dev/" + out if out else dev
+def props(disk):
+    out = subprocess.run(["lsblk", "-ndo", "ROTA,TRAN,MODEL", disk], capture_output=True, text=True).stdout.split(None, 2)
+    return (out[0] == "1" if out else True), (out[1] if len(out) > 1 else ""), (out[2].strip() if len(out) > 2 else "")
+mounts = json.loads(subprocess.run(["findmnt", "-J", "-b", "-o", "TARGET,SOURCE,FSROOT,FSTYPE,AVAIL"],
+                                   capture_output=True, text=True).stdout)["filesystems"]
+flat = []
+def walk(fs):
+    for f in fs:
+        flat.append(f); walk(f.get("children", []))
+walk(mounts)
+# An automount (autofs) lists itself first, then the real device: take the device.
+here = next((l.split("[")[0].strip() for l in reversed(subprocess.run(
+    ["findmnt", "-no", "SOURCE", "--target", repo], capture_output=True, text=True).stdout.splitlines())
+    if l.startswith("/dev/")), "")
+here_disk = disk_of(here) if here.startswith("/dev/") else ""
+rota, tran, _ = props(here_disk) if here_disk else (False, "", "")
+if not (rota or tran == "usb"):
+    print("FAST"); sys.exit(0)          # already on an SSD: nothing to offer
+seen = set()
+for f in flat:
+    src = f.get("source") or ""
+    if not src.startswith("/dev/") or f.get("fsroot") != "/" or f.get("fstype") not in ("ext4", "xfs", "btrfs", "f2fs"):
+        continue
+    if f["target"].startswith("/boot") or src in seen:
+        continue
+    seen.add(src)
+    d = disk_of(src)
+    r, t, model = props(d)
+    if d == here_disk or r or t == "usb":
+        continue
+    base = "/srv" if f["target"] == "/" else f["target"].rstrip("/")
+    print(f'{base}/irabelle-stack-data\t{int(f.get("avail") or 0) // 2**30} GB free\t{f["target"]} — {model or d}')
+PY
+  if [ "$(head -n1 "$TMP/disks")" = FAST ]; then
+    note "this checkout is already on an SSD — configs and databases stay in it"
+  elif [ ! -s "$TMP/disks" ]; then
+    note "this checkout is on a slow disk, and there is no SSD to put configs on"
+  elif [ -t 0 ]; then
+    say "Configs and databases on a faster disk"
+    note "this checkout is on a slow (spinning or USB) disk: every database here"
+    note "would wait on it. Their config/ folders can live on an SSD instead, at"
+    note "the same paths; the media in downloads/ stays where it is."
+    i=0
+    while IFS=$'\t' read -r dir free where; do
+      i=$((i + 1)); printf '      %d) %s  (%s, %s)\n' "$i" "$dir" "$free" "$where"
+    done <"$TMP/disks"
+    read -r -p "    pick one [1-$i], or Enter to keep them here: " pick || pick=
+    if [[ "$pick" =~ ^[0-9]+$ ]] && [ "$pick" -ge 1 ] && [ "$pick" -le "$i" ]; then
+      FAST_DATA_DIR=$(sed -n "${pick}p" "$TMP/disks" | cut -f1)
+    else
+      FAST_DATA_DIR=none
+      note "kept here — change your mind with: ./setup.sh --fast-disk DIR"
+    fi
+    host_env_set FAST_DATA_DIR "$FAST_DATA_DIR"
+  else
+    note "configs stay on this (slow) disk — no terminal to ask on; use --fast-disk DIR"
+  fi
+fi
+
+if [ -n "$FAST_DATA_DIR" ] && [ "$FAST_DATA_DIR" != none ]; then
+  say "Configs and databases on $FAST_DATA_DIR"
+  if sudo "$REPO_DIR/fast-disk.sh" apply "$FAST_DATA_DIR"; then
+    :
+  else
+    warn "could not move the configs — they stay in the checkout. Retry with:"
+    warn "  sudo ./fast-disk.sh apply $FAST_DATA_DIR"
+  fi
 fi
 
 # --- Docker mount guard -------------------------------------------------------
