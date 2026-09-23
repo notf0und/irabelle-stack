@@ -5,10 +5,14 @@
 #   ./setup.sh              prepare, start Dockhand, print its URL, and install
 #                           the two cron jobs
 #   ./setup.sh --no-cron    do not install the cron jobs
-#   ./setup.sh --no-trust-ca  skip installing the root CA into this host's
-#                             own trust store (done by default; sudo — every
-#                             client device still needs its own one-time step
-#                             regardless)
+#   ./setup.sh --no-trust-ca    skip installing the root CA into this host's
+#                               own trust store (done by default; sudo —
+#                               every client device still needs its own
+#                               one-time step regardless)
+#   ./setup.sh --no-mount-guard skip telling Docker to wait for this
+#                               checkout's filesystem at boot, if it is on a
+#                               separate mount (done by default when it is;
+#                               sudo; a no-op on this boot either way)
 #
 # Any stack added later is still deployed from Dockhand's UI — setup.sh only
 # auto-starts what it can start safely (see step 4 below). What it does first
@@ -24,7 +28,9 @@
 #   5. Dockhand, on a directly reachable port, with a baseline configuration
 #      (timezone, update/prune/version-check settings) applied once
 #   6. trust the root CA on this host (see --no-trust-ca above)
-#   7. hand this host's DNS back to the router if ~/manual-dns.sh shows a
+#   7. tell Docker to wait for this checkout's filesystem at boot, if it is a
+#      separate mount (see --no-mount-guard above)
+#   8. hand this host's DNS back to the router if ~/manual-dns.sh shows a
 #      manual override active and adblock is actually running (not every
 #      install has this script — it's this bootstrapping problem's own
 #      escape hatch, see the block near the end of this file)
@@ -42,6 +48,7 @@ cd "$REPO_DIR"
 DOCKHAND_PORT=${DOCKHAND_PORT:-3000}
 CRON_MODE=yes
 TRUST_CA=yes
+MOUNT_GUARD=yes
 
 usage() {
   cat <<'EOF'
@@ -49,12 +56,19 @@ Usage: ./setup.sh [options]
 
   --no-cron       do not install the cron jobs
   --cron          (default) install them
-  --no-trust-ca   do not install the root CA into this host's own trust store
-  --trust-ca      (default) install it (needs sudo). This only affects the
-                  host itself — every *client* device (phone, laptop, ...)
-                  still needs the one-time manual step printed at the end,
-                  regardless of this flag.
-  -h, --help      this text
+  --no-trust-ca     do not install the root CA into this host's own trust
+                    store
+  --trust-ca        (default) install it (needs sudo). This only affects
+                    the host itself — every *client* device (phone,
+                    laptop, ...) still needs the one-time manual step
+                    printed at the end, regardless of this flag.
+  --no-mount-guard  do not add the systemd drop-in that makes Docker wait
+                    for this checkout's filesystem at boot
+  --mount-guard     (default) add it, if this checkout is on a separate
+                    mount (needs sudo; a no-op if it's on the root
+                    filesystem, or if Docker is already configured to
+                    wait for it)
+  -h, --help        this text
 
 Environment:
   DOCKHAND_PORT           host port for Dockhand (default 3000)
@@ -69,6 +83,8 @@ while [ $# -gt 0 ]; do
     --no-cron) CRON_MODE=no ;;
     --trust-ca) TRUST_CA=yes ;;
     --no-trust-ca) TRUST_CA=no ;;
+    --mount-guard) MOUNT_GUARD=yes ;;
+    --no-mount-guard) MOUNT_GUARD=no ;;
     -h|--help) usage 0 ;;
     *) echo "Unknown option: $1" >&2; usage 2 ;;
   esac
@@ -347,6 +363,39 @@ fi
 if find "$REPO_DIR" -path "$REPO_DIR/.git" -prune -o -user root -print -quit 2>/dev/null | grep -q .; then
   warn "root-owned paths already exist in this checkout (from an earlier run)"
   warn "clear them once with: sudo chown -R $(id -un) '$REPO_DIR'"
+fi
+
+# --- Docker mount guard -------------------------------------------------------
+# Same root-owned-directory problem as "Bind mounts" above, triggered by a
+# boot race instead of a fresh checkout: if this repo lives on a filesystem
+# that isn't mounted yet when Docker starts, Docker still starts, finds the
+# bind-mount sources missing, and creates them itself as root — then the real
+# mount lands on top a moment later, hiding a directory Docker manages
+# instead of one you do. A systemd drop-in telling Docker to wait fixes it at
+# the source. Only relevant at all when this checkout is on a separate mount.
+if command -v findmnt >/dev/null 2>&1 && command -v systemctl >/dev/null 2>&1; then
+  MOUNT_TARGET=$(findmnt -n -o TARGET --target "$REPO_DIR" 2>/dev/null || true)
+  if [ -n "$MOUNT_TARGET" ] && [ "$MOUNT_TARGET" != "/" ]; then
+    if systemctl cat docker.service 2>/dev/null | grep -qF "RequiresMountsFor=$MOUNT_TARGET"; then
+      note "docker.service already waits for $MOUNT_TARGET before starting"
+    elif [ "$MOUNT_GUARD" = yes ]; then
+      say "Docker mount guard"
+      DROPIN=/etc/systemd/system/docker.service.d/irabelle-stack-mount.conf
+      if printf '[Unit]\nRequiresMountsFor=%s\n' "$MOUNT_TARGET" | sudo tee "$DROPIN" >/dev/null \
+         && sudo systemctl daemon-reload; then
+        note "docker.service now waits for $MOUNT_TARGET before starting ($DROPIN)"
+        note "takes effect on this host's next boot — Docker is already up"
+        note "and the mount is already in place, so nothing changes right now"
+      else
+        warn "could not add the mount guard — add it by hand:"
+        warn "  printf '[Unit]\\nRequiresMountsFor=$MOUNT_TARGET\\n' |"
+        warn "    sudo tee $DROPIN && sudo systemctl daemon-reload"
+      fi
+    else
+      note "$REPO_DIR is on a separate mount ($MOUNT_TARGET) but --no-mount-guard"
+      note "was passed — Docker is not guaranteed to wait for it at boot"
+    fi
+  fi
 fi
 
 # --- 4. traefik, and any other stack whose networks are ready ---------------
