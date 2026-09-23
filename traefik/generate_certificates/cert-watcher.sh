@@ -130,14 +130,18 @@ reconcile() {
 }
 
 exec 9>"$LOCK_FILE"
-# exit immediately if another instance is already running
-if ! flock -n 9; then
-  echo "Another instance is already running (lock held on $LOCK_FILE) — exiting"
+
+# --once (setup.sh runs it to issue a certificate right now) waits for a
+# running watcher's current reconcile instead of silently doing nothing.
+if [ "${1:-}" = "--once" ]; then
+  flock -w 60 9 || { echo "lock on $LOCK_FILE still held after 60s — giving up" >&2; exit 1; }
+  reconcile
   exit 0
 fi
 
-if [ "${1:-}" = "--once" ]; then
-  reconcile
+# exit immediately if another instance is already running
+if ! flock -n 9; then
+  echo "Another instance is already running (lock held on $LOCK_FILE) — exiting"
   exit 0
 fi
 
@@ -145,18 +149,24 @@ reconcile
 log "Watching Docker events for new .$TLD services..."
 
 while true; do
-  # timeout forces a periodic full reconcile even without events
-  timeout 300 docker events \
+  # timeout forces a periodic full reconcile even without events.
+  # health_status matters: Traefik only registers a container with a
+  # healthcheck once it is healthy (authentik takes a minute or more).
+  # {{.Action}}, not {{.Status}}: Docker 29 dropped Status from events, and
+  # the template error made this exit at once — a 5s busy loop.
+  # 9>&-: children must not inherit the lock, or a killed watcher's leftover
+  # children keep holding it and the replacement setup.sh starts exits at once.
+  timeout 300 docker events 9>&- \
     --filter event=create --filter event=start --filter event=update \
     --filter event=stop --filter event=die --filter event=destroy \
-    --filter event=rename \
-    --format '{{.Status}}' \
+    --filter event=rename --filter event=health_status \
+    --format '{{.Action}}' \
     | while read -r _ev; do
         # brief delay lets Traefik register the new container's router first
         sleep 3
         reconcile
-      done || true
+      done 9>&- || true
   log "Docker events stream ended/timeout — re-syncing"
   reconcile
-  sleep 5
+  sleep 5 9>&-
 done
