@@ -30,6 +30,7 @@
 # Environment:
 #   DOCKHAND_URL     default: the dockhand container's address (via docker)
 #   DOCKHAND_TOKEN   bearer token, needed only once Dockhand auth is enabled
+#                    (default: dockhand/.api-token, written by ./setup.sh)
 #   DOCKHAND_ENV     environment name or id (default: the first one)
 #   UPDATE_LOCK      lock file (default /tmp/irabelle-update.lock)
 # ---------------------------------------------------------------------------
@@ -117,6 +118,12 @@ if [ -z "${DOCKHAND_URL:-}" ]; then
   DOCKHAND_URL="http://$cid_ip:3000"
 fi
 DOCKHAND_URL=${DOCKHAND_URL%/}
+
+# Once Dockhand authentication is on, ./setup.sh leaves an API token here for
+# this script (single sign-on step). DOCKHAND_TOKEN, if set, wins.
+if [ -z "${DOCKHAND_TOKEN:-}" ] && [ -r "$REPO_DIR/dockhand/.api-token" ]; then
+  DOCKHAND_TOKEN=$(cat "$REPO_DIR/dockhand/.api-token")
+fi
 
 api() {
   local method=$1 path=$2 body=${3:-}

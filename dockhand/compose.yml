@@ -23,6 +23,12 @@ services:
       # makes relative mounts work. setup.sh fills STACK_ROOT in from
       # @REPO_DIR@ in dockhand/.env.example.
       DATA_DIR: ${STACK_ROOT:?STACK_ROOT is unset - run ./setup.sh, or set it in dockhand/.env}/dockhand/config/dockhand
+      # Single sign-on: Dockhand fetches authentik's discovery document, and
+      # exchanges the login code for a token, itself — server-side, over
+      # https://authentik.$TLD, whose certificate our own root CA signed. The
+      # CA is already inside the container (the checkout is mounted below);
+      # this makes Node trust it. A missing file only logs a warning.
+      NODE_EXTRA_CA_CERTS: ${STACK_ROOT}/traefik/generate_certificates/root-certificates/root-ca.crt
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - /etc/localtime:/etc/localtime:ro

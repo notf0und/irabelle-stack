@@ -1,0 +1,161 @@
+# irabelle — everything authentik needs to know about this install.
+#
+# The worker applies this on start and re-applies it whenever it changes, so
+# this file, not authentik's UI, is where these objects are defined. Values
+# come from authentik/.env (read with !Env), so nothing here is per-install.
+#
+#   * the admin user (ADMIN_USERNAME / ADMIN_PASSWORD) — created once,
+#     `state: created`, so a password changed in authentik's UI stays changed
+#   * Dockhand: an OIDC client; ./setup.sh registers the matching provider on
+#     Dockhand's side
+#   * Pi-hole: a forward-auth proxy provider, served by the embedded outpost
+#     that Traefik's `authentik` middleware talks to
+#
+# Both applications are bound to the `authentik Admins` group, so a user
+# added to authentik later for something else does not get into either.
+version: 1
+metadata:
+  name: irabelle
+  labels:
+    blueprints.goauthentik.io/description: Admin user, Dockhand OIDC client and Pi-hole forward auth for irabelle-stack
+context:
+  tld: !Env [TLD, smart]
+  username: !Env ADMIN_USERNAME
+  password: !Env ADMIN_PASSWORD
+  email: !Env [ADMIN_EMAIL, ""]
+  dockhand_secret: !Env DOCKHAND_OIDC_CLIENT_SECRET
+entries:
+  # --- what this depends on ----------------------------------------------------
+  # Blueprints are applied in no particular order on a fresh database. Every
+  # !Find below looks up an object one of these creates, so make sure they
+  # have run first rather than find nothing and silently store a null.
+  - model: authentik_blueprints.metaapplyblueprint
+    attrs:
+      identifiers:
+        path: system/bootstrap.yaml
+      required: false
+  - model: authentik_blueprints.metaapplyblueprint
+    attrs:
+      identifiers:
+        path: system/providers-oauth2.yaml
+      required: false
+  - model: authentik_blueprints.metaapplyblueprint
+    attrs:
+      identifiers:
+        path: system/providers-proxy.yaml
+      required: false
+  - model: authentik_blueprints.metaapplyblueprint
+    attrs:
+      identifiers:
+        path: default/flow-default-authentication-flow.yaml
+      required: false
+  - model: authentik_blueprints.metaapplyblueprint
+    attrs:
+      identifiers:
+        path: default/flow-default-provider-authorization-implicit-consent.yaml
+      required: false
+  - model: authentik_blueprints.metaapplyblueprint
+    attrs:
+      identifiers:
+        path: default/flow-default-provider-invalidation.yaml
+      required: false
+
+  # --- the admin user ----------------------------------------------------------
+  - model: authentik_core.user
+    state: created
+    identifiers:
+      username: !Context username
+    attrs:
+      name: !Context username
+      email: !Context email
+      password: !Context password
+      groups:
+        - !Find [authentik_core.group, [name, authentik Admins]]
+
+  # --- Dockhand: OIDC ----------------------------------------------------------
+  - model: authentik_providers_oauth2.oauth2provider
+    id: dockhand-provider
+    identifiers:
+      name: Dockhand
+    attrs:
+      authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-implicit-consent]]
+      invalidation_flow: !Find [authentik_flows.flow, [slug, default-provider-invalidation-flow]]
+      client_type: confidential
+      client_id: dockhand
+      client_secret: !Context dockhand_secret
+      redirect_uris:
+        - matching_mode: strict
+          url: !Format ["https://dockhand.%s/api/auth/oidc/callback", !Context tld]
+          redirect_uri_type: authorization
+      # Not defaulted for a provider made by a blueprint: without it every
+      # login fails with "The request is otherwise malformed".
+      grant_types:
+        - authorization_code
+        - refresh_token
+      # Dockhand matches on the username claim, and links the OIDC login to the
+      # local Dockhand user setup.sh created with the same name.
+      property_mappings:
+        - !Find [authentik_providers_oauth2.scopemapping, [managed, goauthentik.io/providers/oauth2/scope-openid]]
+        - !Find [authentik_providers_oauth2.scopemapping, [managed, goauthentik.io/providers/oauth2/scope-email]]
+        - !Find [authentik_providers_oauth2.scopemapping, [managed, goauthentik.io/providers/oauth2/scope-profile]]
+      signing_key: !Find [authentik_crypto.certificatekeypair, [name, authentik Self-signed Certificate]]
+  - model: authentik_core.application
+    id: dockhand-app
+    identifiers:
+      slug: dockhand
+    attrs:
+      name: Dockhand
+      provider: !KeyOf dockhand-provider
+      meta_launch_url: !Format ["https://dockhand.%s/", !Context tld]
+      policy_engine_mode: any
+  - model: authentik_policies.policybinding
+    identifiers:
+      target: !KeyOf dockhand-app
+      group: !Find [authentik_core.group, [name, authentik Admins]]
+    attrs:
+      order: 0
+
+  # --- Pi-hole: forward auth ---------------------------------------------------
+  # forward_single: one application behind one host. Traefik's `authentik`
+  # middleware asks the embedded outpost about every request to that host;
+  # Pi-hole itself runs with no password (see adblock/compose.yml).
+  - model: authentik_providers_proxy.proxyprovider
+    id: pihole-provider
+    identifiers:
+      name: Pi-hole
+    attrs:
+      authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-implicit-consent]]
+      invalidation_flow: !Find [authentik_flows.flow, [slug, default-provider-invalidation-flow]]
+      mode: forward_single
+      external_host: !Format ["https://pihole.%s", !Context tld]
+  - model: authentik_core.application
+    id: pihole-app
+    identifiers:
+      slug: pihole
+    attrs:
+      name: Pi-hole
+      provider: !KeyOf pihole-provider
+      meta_launch_url: !Format ["https://pihole.%s/admin/", !Context tld]
+      policy_engine_mode: any
+  - model: authentik_policies.policybinding
+    identifiers:
+      target: !KeyOf pihole-app
+      group: !Find [authentik_core.group, [name, authentik Admins]]
+    attrs:
+      order: 0
+
+  # The embedded outpost runs inside authentik-server and is what answers the
+  # middleware. It only serves the providers listed here, so every
+  # forward-auth provider above must be added to this list too.
+  - model: authentik_outposts.outpost
+    identifiers:
+      managed: goauthentik.io/outposts/embedded
+    attrs:
+      name: authentik Embedded Outpost
+      type: proxy
+      providers:
+        - !KeyOf pihole-provider
+      config:
+        # Where the outpost sends a browser to log in. Without it, it guesses
+        # from the request, which inside Docker is the container's own name.
+        authentik_host: !Format ["https://authentik.%s/", !Context tld]

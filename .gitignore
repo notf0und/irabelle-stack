@@ -50,3 +50,12 @@ host.env
 # {stack}/config/{service}/ — which is what pihole/ and unbound/ are here.
 **/config/pihole/*
 !**/config/pihole/dnsmasq.d/
+
+# authentik's database and its media (uploaded icons and the like). The
+# blueprint next to them is ours and stays tracked.
+**/config/postgresql/*
+**/config/authentik/data/
+
+# The Dockhand API token ./setup.sh mints for itself and update.sh once
+# Dockhand authentication is on.
+dockhand/.api-token

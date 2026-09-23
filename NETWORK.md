@@ -106,7 +106,8 @@ services:
       FTLCONF_dns_upstreams: 10.77.40.6        # nothing external
       FTLCONF_dns_listeningMode: all           # gotcha 1
       FTLCONF_misc_etc_dnsmasq_d: "true"       # so the .smart wildcard is read
-      FTLCONF_webserver_api_password: ${PIHOLE_PASSWORD:?}
+      FTLCONF_webserver_api_password: ""        # authentik is the login (README)
+      FTLCONF_webserver_acl: "-0.0.0.0/0,-[::]/0,+127.0.0.1,+[::1],+${APP_BRIDGE_SUBNET}"
     networks:
       app-macvlan:
         ipv4_address: 192.168.40.5
@@ -122,8 +123,11 @@ networks:
   adblock:     {driver: bridge, ipam: {config: [{subnet: 10.77.40.0/24}]}}
 ```
 
-`adblock/.env` carries `TLD`, `TZ`, `PIHOLE_PASSWORD` and `PIHOLE_IP`, and is
-gitignored. The `.smart` wildcard lives in
+`adblock/.env` carries `TLD`, `TZ`, `PIHOLE_IP` and `APP_BRIDGE_SUBNET`, and
+is gitignored. The UI has no password of its own — `pihole.$TLD` is behind
+authentik's forward auth — so the web ACL is what stops 192.168.40.5 from
+serving it password-free to the LAN: only `app-bridge`, where Traefik is,
+gets in. `setup.sh` fills in that subnet. The `.smart` wildcard lives in
 `adblock/config/pihole/dnsmasq.d/99-irabelle.conf` — the same mechanism the station
 build uses (`etc_dnsmasq_d = true` plus `address=/.domain/ip` files):
 

@@ -1,8 +1,9 @@
 # irabelle-stack
 
 A small self-hosted stack — [Traefik](https://traefik.io) as the HTTPS
-front door and [dockhand](https://github.com/fnsys/dockhand) as the Docker
-dashboard — that publishes services under an internal domain
+front door, [dockhand](https://github.com/fnsys/dockhand) as the Docker
+dashboard and [authentik](https://goauthentik.io) as the one login for both
+and for Pi-hole — that publishes services under an internal domain
 (`traefik.smart`, `dockhand.smart`, ...) with locally-signed certificates.
 
 ```
@@ -29,9 +30,16 @@ dashboard — that publishes services under an internal domain
 ├── dockhand/
 │   ├── compose.yml                  # reads ${TLD} from .env
 │   └── config/dockhand/             # runtime state, not in git
+├── authentik/
+│   ├── compose.yml                  # server + worker + postgres; the forward-auth middleware
+│   ├── .env.example                 # your login, generated secrets
+│   └── config/
+│       ├── authentik/blueprints/irabelle.yaml  # user, Dockhand OIDC, Pi-hole proxy
+│       ├── authentik/data/          # media — not in git
+│       └── postgresql/              # the database — not in git
 └── adblock/
     ├── compose.yml                  # Pi-hole + Unbound, on the Docker VLAN
-    ├── .env.example                 # TLD, TZ, PIHOLE_PASSWORD, static IPs
+    ├── .env.example                 # TLD, TZ, static IPs
     └── config/                          # one directory per service
         ├── pihole/                      #   → /etc/pihole
         │   ├── dnsmasq.d/99-irabelle.conf   # the *.$TLD wildcard
@@ -245,27 +253,33 @@ work Dockhand cannot do for itself:
    applied once, only when Dockhand's own database is empty (a fresh
    install); it never overwrites a setting you change afterward in
    Dockhand's UI, the same way an existing `.env` is left alone;
-7. trust the root CA on this host itself (`sudo`; skip with `--no-trust-ca`)
+7. set up **single sign-on** — it asks once for a username (your login for
+   authentik, Dockhand and Pi-hole) and generates the password, then makes
+   that the Dockhand login too and switches Dockhand's authentication on.
+   See [Single sign-on](#single-sign-on-authentik);
+8. trust the root CA on this host itself (`sudo`; skip with `--no-trust-ca`)
    — every *client* device (phone, laptop, ...) still needs its own one-time
    step regardless, printed at the end alongside the CA's path;
-8. if `~/manual-dns.sh` exists and shows a manual override active (this
+9. if `~/manual-dns.sh` exists and shows a manual override active (this
    repo's own bootstrapping-before-Pi-hole-exists escape hatch, not
    something every install has), hand this host's DNS back to whatever the
    router now provides — safe to skip if adblock isn't actually running yet;
-9. print the URLs to open last, as clickable hyperlinks — `https://dockhand.<TLD>`
-   first, `ip:port` fallbacks after — so it works over SSH: clicking a
-   hyperlink opens it in the browser on *your* machine, which is the only way
-   this can work at all over a plain SSH session, since nothing running on
-   the server can reach into a remote desktop on its own. It only tries to
-   launch a browser itself when the host has a display to draw on.
+10. print your login and the URLs to open last, as clickable hyperlinks —
+    `https://dockhand.<TLD>` first, `ip:port` fallbacks after — so it works
+    over SSH: clicking a hyperlink opens it in the browser on *your* machine,
+    which is the only way this can work at all over a plain SSH session,
+    since nothing running on the server can reach into a remote desktop on
+    its own. It only tries to launch a browser itself when the host has a
+    display to draw on.
 
-Any stack added later than the two above is still deployed by hand, from
+Any stack added later than the ones above is still deployed by hand, from
 Dockhand's UI.
 
 Because Dockhand's own `dockhand.<TLD>` name needs Traefik, its port is
 published directly (`DOCKHAND_PORT`, default 3000) — that URL is the
-chicken-and-egg escape hatch. It bypasses Traefik's TLS, so **turn on
-authentication**; `setup.sh` warns if it is still off.
+chicken-and-egg escape hatch. It bypasses Traefik's TLS, which is why the
+single sign-on step switches Dockhand's authentication on; `setup.sh` warns
+if it is still off.
 
 It also installs two cron jobs — `update.sh`, which every 12 hours pulls this
 checkout and makes newly added stacks *available* in Dockhand, and the
@@ -329,11 +343,14 @@ cannot be emptied without `sudo` — `rm -rf` fails on it — which is the annoy
 this layout exists to avoid.
 
 Nothing is hidden in a volume: everything a stack writes stays in the checkout,
-where you can read and edit it. Two things make that work:
+where you can read and edit it. Three things make that work:
 
 * `setup.sh` creates the directories a container would otherwise create for
   itself — `dockhand/config/dockhand`, `traefik/config/logs`, plus every bind
   mount source — **as you**, so no directory here is ever root-owned.
+* Where an image lets it, the container simply runs as you (`PUID`/`PGID`):
+  every `authentik` container does, postgres included, so its database under
+  `authentik/config/postgresql` is yours outright.
 * It then puts a **default ACL** on the directories containers write into
   (`adblock/config/pihole`, `dockhand/config/dockhand`,
   `traefik/config/logs`). New files inherit it, new subdirectories inherit it
@@ -365,8 +382,11 @@ the stack's **Environment variables** panel:
 | Variable | Value |
 | --- | --- |
 | `TLD` | `smart` |
-| `PIHOLE_PASSWORD` | the Pi-hole admin password |
 | `PIHOLE_IP` | `192.168.40.5` |
+| `APP_BRIDGE_SUBNET` | `docker network inspect app-bridge` → its subnet (the only one let into the Pi-hole UI) |
+
+The `authentik` stack needs everything in `authentik/.env.example` the same
+way — the secrets are the `change-me` lines there.
 
 `env_file` is declared optional in `adblock/compose.yml` for exactly this
 reason, so a missing `.env` is not an error, and Pi-hole is configured entirely
@@ -421,8 +441,55 @@ Two deliberate behaviours: it takes a lock so one run cannot overlap the next,
 and if `git pull --ff-only` fails it exits **before** registering anything — a
 half-updated checkout, or one with local edits, is not something to hand to
 Dockhand. It locates Dockhand by inspecting the container; set `DOCKHAND_URL` to
-point it elsewhere, and `DOCKHAND_TOKEN` to a bearer token once Dockhand
-authentication is enabled.
+point it elsewhere. Once Dockhand authentication is on it authenticates with
+the API token `setup.sh` saved to `dockhand/.api-token`; `DOCKHAND_TOKEN`
+overrides it.
+
+## Single sign-on (authentik)
+
+One login — asked for once by `setup.sh`, password generated — covers
+authentik, Dockhand and Pi-hole, and logging in to one logs you in to the
+others. `setup.sh` prints it at the end; it is also in `authentik/.env`
+(`ADMIN_USERNAME`, `ADMIN_PASSWORD`). Change the password in authentik
+(`https://authentik.<TLD>`, top right → Settings), not in that file: the
+user is created once, the first time authentik starts, and the file is not
+read for it again.
+
+How each service is wired:
+
+* **authentik** itself is configured by
+  `authentik/config/authentik/blueprints/irabelle.yaml`, which the worker
+  applies on every start — the user (in `authentik Admins`), an OIDC client
+  for Dockhand, and a proxy provider for Pi-hole. Both applications are bound
+  to `authentik Admins`, so a user added later for something else gets into
+  neither. Edit the blueprint, not the UI, for anything it defines.
+* **Dockhand** speaks OIDC itself. `setup.sh` creates a local Dockhand user
+  with the same name and password, registers authentik as its OIDC provider
+  (the default button on the login page) and switches authentication on.
+  Dockhand matches the authentik login to that user by name. The local
+  password is the way in while authentik is down (on `http://<host>:3000`
+  too), but it is a copy: it does not follow a later change in authentik.
+  Dockhand checks the login server-side at `https://authentik.<TLD>`, which
+  it reaches through a Traefik alias on `app-bridge` and trusts through
+  `NODE_EXTRA_CA_CERTS` (both in the compose files, no DNS needed).
+* **Pi-hole** has no OIDC, so it gets **forward auth** instead: its HTTPS
+  router carries Traefik's `authentik@docker` middleware, which asks
+  authentik about every request first. Pi-hole's own password is switched
+  off — authentik's login is the only one — and its web server only accepts
+  connections from `app-bridge` (`FTLCONF_webserver_acl`), so Pi-hole's LAN
+  address (192.168.40.5) cannot be used to get around it. DNS on that
+  address is unaffected. If authentik is down, `pihole.<TLD>` answers 404
+  rather than letting anyone in.
+
+To put another service behind the login the same way, add
+`authentik@docker` to its router's middlewares, then add a `forward_single`
+proxy provider and application for it to the blueprint — and the provider
+to the embedded outpost's list there.
+
+authentik also always has its own built-in `akadmin` account. You do not use
+it, but it is given a generated password (`AUTHENTIK_BOOTSTRAP_PASSWORD`),
+because an `akadmin` without one leaves authentik's first-run setup page open
+to anyone on the LAN.
 
 ## Configuration
 
@@ -704,6 +771,8 @@ committed by accident:
 | `**/generate_certificates/root-certificates/` | the private root CA |
 | `**/config/logs/*` | Traefik's access log keeps request headers (cookies, auth) |
 | `**/config/dockhand/*` | `.encryption_key`, sqlite DB, icon cache |
+| `**/config/postgresql/*`, `**/config/authentik/data/` | authentik's database (every user and session) and media |
+| `dockhand/.api-token` | the Dockhand API token `setup.sh` and `update.sh` use |
 
 The patterns use `**/` so any stack added later is covered without touching
 `.gitignore`. Nothing generated is committed and no `.gitkeep` placeholders are

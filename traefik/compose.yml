@@ -28,8 +28,16 @@ services:
       traefik.http.routers.traefik-https.tls: true
       traefik.http.routers.traefik-https.observability.accesslogs: false
     networks:
-      - default
-      - app-bridge
+      default: {}
+      app-bridge:
+        # A container that logs in through authentik over OIDC (Dockhand)
+        # talks to it server-side, and has to use the very URL the browser
+        # uses — https://authentik.$TLD — or the issuer in the tokens will not
+        # match. Answering to that name here makes Docker's own DNS resolve it
+        # to Traefik for everything on app-bridge: no dependency on Pi-hole
+        # being up, and no hairpin through the host's published ports.
+        aliases:
+          - authentik.${TLD:?TLD is not set in .env (see .env.example)}
     healthcheck:
       test: ["CMD", "traefik", "healthcheck", "--ping"]
       interval: 10s

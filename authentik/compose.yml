@@ -1,0 +1,159 @@
+# authentik — single sign-on for the rest of the stack.
+#
+# Two ways other services use it:
+#
+#   * OIDC, for services that speak it themselves — Dockhand. setup.sh
+#     registers the provider in Dockhand; the client lives in the blueprint.
+#   * Forward auth, for services that do not — Pi-hole. Traefik asks
+#     authentik (the `authentik` middleware defined below) before every
+#     request, so the service itself needs no login of its own.
+#
+# Everything authentik needs to know about this install — the admin user,
+# the Dockhand client, the Pi-hole proxy provider — is declared in
+# config/authentik/blueprints/irabelle.yaml and applied by the worker on
+# start, so a fresh clone needs no clicking through authentik's UI.
+#
+# Postgres is on a private bridge nobody else joins; only the server is on
+# app-bridge, because only the server is something Traefik talks to.
+
+services:
+  postgresql:
+    # The major version is pinned on purpose: a new major cannot read the old
+    # one's data directory without a dump/restore, so it must never arrive
+    # through an automatic update.
+    image: postgres:16-alpine
+    container_name: authentik-postgresql
+    # As you, not as the image's own postgres user (uid 70): the data lives in
+    # this checkout, and a directory owned by someone else is one you cannot
+    # delete without sudo (see "Keeping the checkout yours" in the README).
+    user: "${PUID:-1000}:${PGID:-1000}"
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: authentik
+      POSTGRES_USER: authentik
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is unset - run ./setup.sh, or set it in authentik/.env}
+    volumes:
+      - ./config/postgresql:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -d authentik -U authentik"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks:
+      - authentik
+
+  server:
+    image: ghcr.io/goauthentik/server:${AUTHENTIK_TAG:-2026.8.3}
+    container_name: authentik-server
+    command: server
+    user: "${PUID:-1000}:${PGID:-1000}"
+    restart: unless-stopped
+    # Optional for the same reason as in adblock/compose.yml: on a git-based
+    # deploy the values come from the Dockhand stack's environment panel, and
+    # are handed over through `environment:` below instead.
+    env_file:
+      - path: .env
+        required: false
+    environment: &authentik-env
+      AUTHENTIK_POSTGRESQL__HOST: authentik-postgresql
+      AUTHENTIK_POSTGRESQL__NAME: authentik
+      AUTHENTIK_POSTGRESQL__USER: authentik
+      AUTHENTIK_POSTGRESQL__PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is unset - run ./setup.sh, or set it in authentik/.env}
+      AUTHENTIK_SECRET_KEY: ${AUTHENTIK_SECRET_KEY:?AUTHENTIK_SECRET_KEY is unset - run ./setup.sh, or set it in authentik/.env}
+      AUTHENTIK_ERROR_REPORTING__ENABLED: ${AUTHENTIK_ERROR_REPORTING__ENABLED:-false}
+    shm_size: 512mb
+    volumes: &authentik-volumes
+      - ./config/authentik/data:/data
+      # Our blueprint, next to the ones the image ships in /blueprints.
+      - ./config/authentik/blueprints:/blueprints/irabelle:ro
+    depends_on:
+      postgresql:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "ak", "healthcheck"]
+      interval: 30s
+      timeout: 30s
+      retries: 3
+      start_period: 60s
+    networks:
+      - authentik
+      - app-bridge
+    labels:
+      traefik.enable: true
+      traefik.http.services.authentik.loadbalancer.server.port: 9000
+
+      traefik.http.routers.authentik.rule: Host("authentik") || Host("authentik.${TLD:?TLD is unset - set it in authentik/.env or in the Dockhand stack environment panel}")
+      traefik.http.routers.authentik.entrypoints: web
+      traefik.http.routers.authentik.service: authentik
+      traefik.http.routers.authentik.middlewares: authentik-tohttps
+      traefik.http.middlewares.authentik-tohttps.redirectscheme.scheme: https
+
+      traefik.http.routers.authentik-https.rule: Host("authentik") || Host("authentik.${TLD:?TLD is unset - set it in authentik/.env or in the Dockhand stack environment panel}")
+      traefik.http.routers.authentik-https.entrypoints: websecure
+      traefik.http.routers.authentik-https.service: authentik
+      traefik.http.routers.authentik-https.tls: true
+
+      # Forward auth. A router protected by it lists `authentik@docker` in its
+      # middlewares (see adblock/compose.yml); Traefik then asks the embedded
+      # outpost about every request first, and only an authenticated one gets
+      # through. Addressed by container name over app-bridge, never through
+      # Traefik itself, so it needs no certificate and no DNS.
+      traefik.http.middlewares.authentik.forwardauth.address: http://authentik-server:9000/outpost.goauthentik.io/auth/traefik
+      traefik.http.middlewares.authentik.forwardauth.trustForwardHeader: true
+      traefik.http.middlewares.authentik.forwardauth.authResponseHeaders: X-authentik-username,X-authentik-groups,X-authentik-entitlements,X-authentik-email,X-authentik-name,X-authentik-uid,X-authentik-jwt,X-authentik-meta-jwks,X-authentik-meta-outpost,X-authentik-meta-provider,X-authentik-meta-app,X-authentik-meta-version
+
+      # The login round trip ends on the *protected* host
+      # (https://pihole.$TLD/outpost.goauthentik.io/callback), so that path has
+      # to reach authentik on every host, not just authentik.$TLD. Any host,
+      # so a service protected later needs no change here; the high priority
+      # is what beats that service's own, longer Host() rule.
+      traefik.http.routers.authentik-outpost.rule: PathPrefix("/outpost.goauthentik.io/")
+      traefik.http.routers.authentik-outpost.priority: 1000
+      traefik.http.routers.authentik-outpost.entrypoints: websecure
+      traefik.http.routers.authentik-outpost.service: authentik
+      traefik.http.routers.authentik-outpost.tls: true
+
+  worker:
+    image: ghcr.io/goauthentik/server:${AUTHENTIK_TAG:-2026.8.3}
+    container_name: authentik-worker
+    command: worker
+    # Not root, and no Docker socket: those are only for outposts authentik
+    # deploys as containers of their own. The embedded outpost, inside the
+    # server, is all this stack uses.
+    user: "${PUID:-1000}:${PGID:-1000}"
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      <<: *authentik-env
+      # The worker is what applies blueprints: these are what ours reads.
+      TLD: ${TLD:?TLD is unset - set it in authentik/.env or in the Dockhand stack environment panel}
+      ADMIN_USERNAME: ${ADMIN_USERNAME:?ADMIN_USERNAME is unset - run ./setup.sh, or set it in authentik/.env}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?ADMIN_PASSWORD is unset - run ./setup.sh, or set it in authentik/.env}
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-}
+      AUTHENTIK_BOOTSTRAP_PASSWORD: ${AUTHENTIK_BOOTSTRAP_PASSWORD:?AUTHENTIK_BOOTSTRAP_PASSWORD is unset - run ./setup.sh, or set it in authentik/.env}
+      DOCKHAND_OIDC_CLIENT_SECRET: ${DOCKHAND_OIDC_CLIENT_SECRET:?DOCKHAND_OIDC_CLIENT_SECRET is unset - run ./setup.sh, or set it in authentik/.env}
+    shm_size: 512mb
+    volumes: *authentik-volumes
+    depends_on:
+      postgresql:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "ak", "healthcheck"]
+      interval: 30s
+      timeout: 30s
+      retries: 3
+      start_period: 60s
+    networks:
+      - authentik
+
+networks:
+  app-bridge:
+    external: true
+    driver: bridge
+  # Private to this stack: postgres, and the two authentik processes that use it.
+  authentik:
+    name: authentik
+    driver: bridge

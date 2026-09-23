@@ -60,7 +60,18 @@ services:
       # wildcard below lives there. Verified against the station build, which
       # sets etc_dnsmasq_d = true for exactly this reason.
       FTLCONF_misc_etc_dnsmasq_d: "true"
-      FTLCONF_webserver_api_password: ${PIHOLE_PASSWORD:?PIHOLE_PASSWORD is unset - set it in adblock/.env (see .env.example) or in the Dockhand stack environment panel}
+      # No Pi-hole password: logging in is authentik's job. pihole.$TLD goes
+      # through Traefik's `authentik` middleware (the -https router below), so
+      # nobody reaches this UI without the authentik login, and nobody who has
+      # it is asked for a second password.
+      FTLCONF_webserver_api_password: ""
+      # ...which only holds if Traefik is the *only* way in. Pi-hole also has a
+      # LAN address (192.168.40.5, for DNS), and its web server would answer
+      # there too, password-free. This ACL refuses every web client except
+      # localhost and app-bridge — where Traefik is. DNS is not affected.
+      # setup.sh writes app-bridge's subnet into adblock/.env; unset, only
+      # localhost gets in, so a forgotten value fails closed.
+      FTLCONF_webserver_acl: "-0.0.0.0/0,-[::]/0,+127.0.0.1,+[::1],+${APP_BRIDGE_SUBNET:-127.0.0.1/32}"
     networks:
       app-macvlan:
         ipv4_address: ${PIHOLE_IP:-192.168.40.5}
@@ -87,8 +98,12 @@ services:
       traefik.http.routers.pihole-https.rule: Host("pihole") || Host("pihole.${TLD:?TLD is unset - set it in adblock/.env or in the Dockhand stack environment panel}")
       traefik.http.routers.pihole-https.entrypoints: websecure
       traefik.http.routers.pihole-https.tls: true
+      # authentik first: nothing reaches Pi-hole, not even the redirect below,
+      # without logging in. The middleware is defined by the authentik stack;
+      # while that is not running Traefik refuses this router outright (404)
+      # rather than letting requests through unchecked.
       # Pi-hole serves its UI only under /admin; send the bare host there.
-      traefik.http.routers.pihole-https.middlewares: pihole-admin
+      traefik.http.routers.pihole-https.middlewares: authentik@docker,pihole-admin
       traefik.http.middlewares.pihole-admin.redirectregex.regex: ^https?://([^/]+)/?$$
       traefik.http.middlewares.pihole-admin.redirectregex.replacement: https://$${1}/admin/
 

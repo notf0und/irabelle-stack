@@ -27,10 +27,16 @@
 #      deploy
 #   5. Dockhand, on a directly reachable port, with a baseline configuration
 #      (timezone, update/prune/version-check settings) applied once
-#   6. trust the root CA on this host (see --no-trust-ca above)
-#   7. tell Docker to wait for this checkout's filesystem at boot, if it is a
+#   6. single sign-on: the authentik stack's admin login (the username is
+#      asked for once, the password generated) becomes the login for Dockhand
+#      too — a local Dockhand user of the same name, authentik registered as
+#      its OIDC provider, authentication switched on, and an API token for
+#      update.sh. Pi-hole needs nothing here: it sits behind authentik's
+#      forward auth in Traefik, with no password of its own.
+#   7. trust the root CA on this host (see --no-trust-ca above)
+#   8. tell Docker to wait for this checkout's filesystem at boot, if it is a
 #      separate mount (see --no-mount-guard above)
-#   8. hand this host's DNS back to the router if ~/manual-dns.sh shows a
+#   9. hand this host's DNS back to the router if ~/manual-dns.sh shows a
 #      manual override active and adblock is actually running (not every
 #      install has this script — it's this bootstrapping problem's own
 #      escape hatch, see the block near the end of this file)
@@ -73,6 +79,9 @@ Usage: ./setup.sh [options]
 Environment:
   DOCKHAND_PORT           host port for Dockhand (default 3000)
   UPDATE_CRON_SCHEDULE    cron schedule for update.sh (default 0 */12 * * *)
+  ADMIN_USERNAME          the authentik/Dockhand/Pi-hole login to create,
+                          instead of asking (only used the first time, while
+                          authentik/.env has none yet)
 EOF
   exit "${1:-0}"
 }
@@ -216,6 +225,31 @@ for s in "${STACKS[@]}"; do
 done
 note "stacks found: ${STACKS[*]}"
 
+# The one login for authentik, Dockhand and Pi-hole. Its password is a
+# `change-me` placeholder like any other, so it was generated just above; the
+# name is the one thing asked for, and only while authentik/.env has none —
+# the blueprint creates this user the first time authentik starts, so a name
+# picked later would be a second user, not a rename.
+AK_ENV=authentik/.env
+if [ -f "$AK_ENV" ] && [ -z "$(env_var "$AK_ENV" ADMIN_USERNAME)" ]; then
+  ak_user=${ADMIN_USERNAME:-}
+  if [ -z "$ak_user" ] && [ -t 0 ]; then
+    while :; do
+      read -r -p "    login for authentik, Dockhand and Pi-hole [$(id -un)]: " ak_user || true
+      ak_user=${ak_user:-$(id -un)}
+      [[ "$ak_user" =~ ^[A-Za-z0-9._-]+$ ]] && break
+      warn "letters, digits, '.', '_' and '-' only"
+    done
+  fi
+  if [ -z "$ak_user" ]; then
+    ak_user=$(id -un)
+    note "no terminal to ask on — the login is $ak_user (set ADMIN_USERNAME to choose)"
+  fi
+  [[ "$ak_user" =~ ^[A-Za-z0-9._-]+$ ]] || die "ADMIN_USERNAME '$ak_user': letters, digits, '.', '_' and '-' only"
+  sed -i "s|^ADMIN_USERNAME=.*|ADMIN_USERNAME=$ak_user|" "$AK_ENV"
+  note "authentik login: $ak_user (password generated in $AK_ENV)"
+fi
+
 # adblock's dnsmasq wildcard is a real config file, not a .env — Compose can't
 # interpolate ${TLD} into it, so it's kept in sync here the same way. Only the
 # TLD portion of the address=/local= lines is touched; the LAN address next to
@@ -259,6 +293,24 @@ if docker network inspect app-bridge >/dev/null 2>&1; then
 else
   docker network create app-bridge >/dev/null
   note "created app-bridge"
+fi
+
+# Pi-hole's web UI has no password — authentik in front of it is the login —
+# so its web server only lets in app-bridge, where Traefik is (see
+# adblock/compose.yml). app-bridge's subnet is whatever Docker handed out when
+# it was created, so it is looked up here and kept in sync, the same as TLD.
+APP_BRIDGE_SUBNET=$(docker network inspect app-bridge \
+  --format '{{range .IPAM.Config}}{{.Subnet}} {{end}}' 2>/dev/null \
+  | tr ' ' '\n' | grep -m1 '\.' || true)
+if [ -f adblock/.env ] && [ -n "$APP_BRIDGE_SUBNET" ] \
+   && [ "$(env_var adblock/.env APP_BRIDGE_SUBNET)" != "$APP_BRIDGE_SUBNET" ]; then
+  if grep -q '^[[:space:]]*APP_BRIDGE_SUBNET[[:space:]]*=' adblock/.env; then
+    sed -i "s|^[[:space:]]*APP_BRIDGE_SUBNET[[:space:]]*=.*|APP_BRIDGE_SUBNET=$APP_BRIDGE_SUBNET|" adblock/.env
+  else
+    printf '\n# Written by ./setup.sh: the only subnet allowed to reach the Pi-hole UI.\nAPP_BRIDGE_SUBNET=%s\n' \
+      "$APP_BRIDGE_SUBNET" >>adblock/.env
+  fi
+  note "adblock/.env: APP_BRIDGE_SUBNET=$APP_BRIDGE_SUBNET (the Pi-hole UI answers only Traefik)"
 fi
 
 # A stack that needs the host VLAN cannot deploy until host-vlan.sh has run.
@@ -451,17 +503,72 @@ fi
 # paths. Restore just enough that ./update.sh works and the Import dialog can
 # see this checkout — so "clone, ./setup.sh" is all a new box needs, and
 # re-cloning while you iterate does not leave you with a dead UI.
+#
+# Once single sign-on has switched Dockhand's authentication on (below), every
+# call needs a token: DH_TOKEN_FILE holds the one this script minted for itself
+# and for update.sh. Gitignored, and readable by you only.
+DH_TOKEN_FILE="$REPO_DIR/dockhand/.api-token"
+DH_TOKEN=$(cat "$DH_TOKEN_FILE" 2>/dev/null || true)
+
 api() {
   local method=$1 path=$2 body=${3:-}
+  local auth=()
+  [ -n "$DH_TOKEN" ] && auth=(-H "Authorization: Bearer $DH_TOKEN")
   if [ -n "$body" ]; then
-    curl -fsS -m 20 -X "$method" "http://127.0.0.1:$DOCKHAND_PORT$path" \
+    curl -fsS -m 20 -X "$method" "http://127.0.0.1:$DOCKHAND_PORT$path" "${auth[@]}" \
       -H 'Content-Type: application/json' --data-binary "$body"
   else
-    curl -fsS -m 20 -X "$method" "http://127.0.0.1:$DOCKHAND_PORT$path"
+    curl -fsS -m 20 -X "$method" "http://127.0.0.1:$DOCKHAND_PORT$path" "${auth[@]}"
   fi
 }
 
+# The login from authentik/.env, which is also the local Dockhand user.
+AK_USER=$(env_var "$AK_ENV" ADMIN_USERNAME)
+AK_PASS=$(env_var "$AK_ENV" ADMIN_PASSWORD)
+
+# Dockhand only hands out API tokens to a *session*, and asks a local user
+# for their password again when it does — so log in as that user first. JSON
+# is built by python from the environment, not by the shell: a password with
+# a quote in it stays a password, and it never shows up in `ps`.
+mint_dockhand_token() {
+  local jar="$TMP/dockhand.cookies" token
+  [ -n "$AK_USER" ] && [ -n "$AK_PASS" ] || return 1
+  AK_USER=$AK_USER AK_PASS=$AK_PASS python3 -c '
+import json, os, sys
+u, p = os.environ["AK_USER"], os.environ["AK_PASS"]
+json.dump({"username": u, "password": p}, open(sys.argv[1], "w"))
+json.dump({"name": "irabelle-stack (setup.sh, update.sh)", "password": p}, open(sys.argv[2], "w"))
+' "$TMP/login.json" "$TMP/token-req.json"
+  curl -fsS -m 20 -c "$jar" -H 'Content-Type: application/json' \
+    --data-binary @"$TMP/login.json" "http://127.0.0.1:$DOCKHAND_PORT/api/auth/login" >/dev/null 2>&1 \
+    || return 1
+  curl -fsS -m 20 -b "$jar" -H 'Content-Type: application/json' \
+    --data-binary @"$TMP/token-req.json" "http://127.0.0.1:$DOCKHAND_PORT/api/auth/tokens" \
+    >"$TMP/token.json" 2>/dev/null || return 1
+  rm -f "$TMP/login.json" "$TMP/token-req.json" "$jar"
+  token=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("token",""))' "$TMP/token.json" 2>/dev/null || true)
+  [ -n "$token" ] || return 1
+  ( umask 077 && printf '%s\n' "$token" >"$DH_TOKEN_FILE" )
+  DH_TOKEN=$token
+}
+
 if [ "$any" = 1 ]; then
+  # A re-run after authentication was switched on: without a working token
+  # every call below would just fail. Get one back if the token file is gone
+  # (a re-clone) or was revoked in Dockhand.
+  code=$(curl -s -o /dev/null -w '%{http_code}' -m 5 \
+    ${DH_TOKEN:+-H "Authorization: Bearer $DH_TOKEN"} \
+    "http://127.0.0.1:$DOCKHAND_PORT/api/environments" 2>/dev/null || true)
+  if [ "$code" = 401 ]; then
+    if mint_dockhand_token; then
+      note "Dockhand authentication is on — new API token saved to ${DH_TOKEN_FILE#"$REPO_DIR"/}"
+    else
+      warn "Dockhand authentication is on, and logging in as '${AK_USER:-?}' failed."
+      warn "Create an API token in Dockhand (your profile -> API tokens), save it"
+      warn "to ${DH_TOKEN_FILE#"$REPO_DIR"/} and re-run — until then the Dockhand steps fail."
+    fi
+  fi
+
   say "Dockhand baseline"
 
   if api GET /api/environments >"$TMP/envs.json" 2>/dev/null; then
@@ -559,6 +666,152 @@ PY
   if [ -x "$REPO_DIR/update.sh" ]; then
     "$REPO_DIR/update.sh" --no-pull \
       || warn "could not adopt stacks automatically — run it by hand: ./update.sh --no-pull"
+  fi
+
+  # --- 6. single sign-on -------------------------------------------------------
+  # authentik's side (the admin user, the Dockhand OIDC client) is its
+  # blueprint's job; this is Dockhand's side. Each piece is only added when it
+  # is missing, so a re-run changes nothing, and a provider or setting you
+  # edit in Dockhand's own UI afterward is left alone — the same deal as the
+  # baseline above.
+  if [ -f "$AK_ENV" ] && [ -n "$ROOT_TLD" ]; then
+    say "Single sign-on (authentik)"
+    AK_SECRET=$(env_var "$AK_ENV" DOCKHAND_OIDC_CLIENT_SECRET)
+    SSO_OK=yes
+
+    if [ -z "$AK_USER" ] || [ -z "$AK_PASS" ] || [ -z "$AK_SECRET" ]; then
+      warn "$AK_ENV is missing ADMIN_USERNAME, ADMIN_PASSWORD or"
+      warn "DOCKHAND_OIDC_CLIENT_SECRET — Dockhand login left as it is"
+      SSO_OK=no
+    fi
+
+    # The local Dockhand user: the way in when authentik is down, and what
+    # the authentik login attaches to — Dockhand matches an OIDC login to an
+    # existing user by name. Dockhand only lets this be created without
+    # logging in while authentication is still off.
+    if [ "$SSO_OK" = yes ] && api GET /api/users >"$TMP/users.json" 2>/dev/null; then
+      if python3 -c 'import json,sys
+sys.exit(0 if any(u.get("username")==sys.argv[2] for u in json.load(open(sys.argv[1]))) else 1)' \
+           "$TMP/users.json" "$AK_USER"; then
+        note "Dockhand user '$AK_USER' exists"
+      elif AK_USER=$AK_USER AK_PASS=$AK_PASS python3 -c 'import json,os,sys
+json.dump({"username":os.environ["AK_USER"],"password":os.environ["AK_PASS"],"displayName":os.environ["AK_USER"]},open(sys.argv[1],"w"))' \
+             "$TMP/user.json" \
+           && api POST /api/users @"$TMP/user.json" >/dev/null 2>&1; then
+        note "created the Dockhand user '$AK_USER' (same password as authentik)"
+      else
+        warn "could not create the Dockhand user '$AK_USER' — Dockhand login left as it is"
+        SSO_OK=no
+      fi
+      rm -f "$TMP/user.json"
+    elif [ "$SSO_OK" = yes ]; then
+      warn "could not read Dockhand's users — Dockhand login left as it is"
+      SSO_OK=no
+    fi
+
+    # authentik as an OIDC provider. The issuer is authentik's public URL on
+    # purpose: the browser is sent there, and the issuer inside the tokens
+    # has to match it. Dockhand reaches the same name server-side through
+    # Traefik's app-bridge alias, trusting our CA (see dockhand/compose.yml).
+    OIDC_ID=
+    OIDC_ISSUER="https://authentik.$ROOT_TLD/application/o/dockhand/"
+    OIDC_REDIRECT="https://dockhand.$ROOT_TLD/api/auth/oidc/callback"
+    if [ "$SSO_OK" = yes ] && api GET /api/auth/oidc >"$TMP/oidc.json" 2>/dev/null; then
+      # "id issuer redirect" of the provider this script added, if it is there.
+      read -r OIDC_ID OIDC_CUR_ISSUER OIDC_CUR_REDIRECT < <(python3 -c 'import json,sys
+for p in json.load(open(sys.argv[1])):
+    if p.get("clientId") == "dockhand" and "/application/o/dockhand/" in (p.get("issuerUrl") or ""):
+        print(p["id"], p.get("issuerUrl") or "-", p.get("redirectUri") or "-"); break' "$TMP/oidc.json" 2>/dev/null) || true
+      if [ -n "$OIDC_ID" ] && [ "$OIDC_CUR_ISSUER" = "$OIDC_ISSUER" ] && [ "$OIDC_CUR_REDIRECT" = "$OIDC_REDIRECT" ]; then
+        note "authentik is already an OIDC provider in Dockhand"
+      elif [ -n "$OIDC_ID" ]; then
+        # The TLD was renamed since: the blueprint follows on its own, this
+        # copy of the URLs in Dockhand does not.
+        if api PUT "/api/auth/oidc/$OIDC_ID" \
+             "{\"issuerUrl\":\"$OIDC_ISSUER\",\"redirectUri\":\"$OIDC_REDIRECT\"}" >/dev/null 2>&1; then
+          note "Dockhand's authentik provider: URLs moved to .$ROOT_TLD"
+        else
+          warn "could not move Dockhand's authentik provider to .$ROOT_TLD — edit it in Dockhand"
+        fi
+      else
+        AK_SECRET=$AK_SECRET OIDC_ISSUER=$OIDC_ISSUER OIDC_REDIRECT=$OIDC_REDIRECT python3 -c 'import json,os,sys
+json.dump({
+    "name": "authentik",
+    "enabled": True,
+    "issuerUrl": os.environ["OIDC_ISSUER"],
+    "clientId": "dockhand",
+    "clientSecret": os.environ["AK_SECRET"],
+    "redirectUri": os.environ["OIDC_REDIRECT"],
+    "scopes": "openid profile email",
+    "usernameClaim": "preferred_username",
+    "emailClaim": "email",
+    "displayNameClaim": "name",
+}, open(sys.argv[1], "w"))' "$TMP/oidc-new.json"
+        if api POST /api/auth/oidc @"$TMP/oidc-new.json" >"$TMP/oidc-created.json" 2>/dev/null; then
+          OIDC_ID=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["id"])' "$TMP/oidc-created.json" 2>/dev/null || true)
+          note "added authentik as Dockhand's OIDC provider (https://authentik.$ROOT_TLD)"
+        else
+          warn "could not add authentik as an OIDC provider in Dockhand"
+        fi
+        rm -f "$TMP/oidc-new.json"
+      fi
+    fi
+
+    # Authentication on, with authentik as the default button on the login
+    # page. Then the token for update.sh — Dockhand only issues those once
+    # authentication is on.
+    if [ "$SSO_OK" = yes ] && api GET /api/auth/settings >"$TMP/auth.json" 2>/dev/null; then
+      if python3 -c 'import json,sys; sys.exit(0 if json.load(open(sys.argv[1])).get("authEnabled") else 1)' "$TMP/auth.json"; then
+        note "Dockhand authentication is already on"
+      else
+        AUTH_BODY='{"authEnabled":true'
+        [ -n "$OIDC_ID" ] && AUTH_BODY="$AUTH_BODY,\"defaultProvider\":\"oidc:$OIDC_ID\""
+        AUTH_BODY="$AUTH_BODY}"
+        if api PUT /api/auth/settings "$AUTH_BODY" >/dev/null 2>&1; then
+          note "Dockhand authentication: on${OIDC_ID:+ (authentik is the default login)}"
+        else
+          warn "could not switch Dockhand authentication on"
+          SSO_OK=no
+        fi
+      fi
+    fi
+    if [ "$SSO_OK" = yes ] && [ -z "$DH_TOKEN" ]; then
+      if mint_dockhand_token; then
+        note "API token for update.sh saved to ${DH_TOKEN_FILE#"$REPO_DIR"/}"
+      else
+        warn "could not create an API token — update.sh cannot reach Dockhand until"
+        warn "one is saved to ${DH_TOKEN_FILE#"$REPO_DIR"/} (your profile -> API tokens)"
+      fi
+    fi
+
+    # Dockhand can only *check* the provider once authentik is up and its
+    # certificate issued — both of which take a minute on a fresh install. A
+    # failure here is expected then; it is not a failed setup.
+    if [ -n "$OIDC_ID" ]; then
+      printf '    waiting for authentik'
+      for _ in $(seq 1 36); do
+        [ "$(docker inspect -f '{{.State.Health.Status}}' authentik-server 2>/dev/null)" = healthy ] && break
+        printf '.'
+        sleep 5
+      done
+      printf '\n'
+      # Issue authentik.$TLD's certificate now instead of waiting for the
+      # watcher, which is only (re)started further down.
+      "$REPO_DIR/traefik/generate_certificates/cert-watcher.sh" --once >/dev/null 2>&1 || true
+      # Asked from inside the dockhand container, with Node's own fetch: the
+      # same DNS, CA and TLS stack Dockhand's login uses. (Dockhand's own
+      # "Test" button wants a browser session, not the API token.)
+      if docker exec dockhand node -e '
+fetch(process.argv[1]).then(r => r.json()).then(d => process.exit(d.issuer ? 0 : 1)).catch(() => process.exit(1))' \
+           "https://authentik.$ROOT_TLD/application/o/dockhand/.well-known/openid-configuration" >/dev/null 2>&1; then
+        note "Dockhand reaches authentik: sign-in with authentik works"
+      else
+        note "Dockhand cannot reach authentik yet — normal on a first run, until"
+        note "authentik has started and https://authentik.$ROOT_TLD has its certificate."
+        note "Dockhand's authentication settings can re-run the check (Test) later."
+        note "The local login ($AK_USER) works in the meantime."
+      fi
+    fi
   fi
 fi
 
@@ -741,11 +994,6 @@ fi
 TRAEFIK_UP=no
 [ -n "$(docker compose -f traefik/compose.yml ps --status running -q 2>/dev/null)" ] && TRAEFIK_UP=yes
 
-# No "create a Dockhand admin user" step here on purpose: authentication is
-# left as-is deliberately (not just skipped) — the plan is an Authentik
-# container doing OIDC for Dockhand instead of a local Dockhand account, once
-# that's actually wired up. The warning below still fires either way, since
-# it's true regardless of which auth story ends up in place.
 say "What to do now"
 if [ "$TRAEFIK_UP" = yes ]; then
   cat <<EOF
@@ -766,7 +1014,20 @@ fi
 
 if [ "$AUTH_CODE" = 200 ]; then
   warn "authentication is OFF: anyone who can reach that URL can control Docker"
-  warn "on this host. Turn it on in Dockhand: Settings -> Authentication."
+  warn "on this host. The single sign-on step above normally turns it on — see"
+  warn "its warnings — or turn it on in Dockhand: Settings -> Authentication."
+fi
+
+# The one login for all three, printed next to the links it opens. The
+# password is the one generated at first setup: once changed in authentik
+# this line is out of date (and so is the local Dockhand copy of it).
+if [ -n "$AK_USER" ] && [ -n "$AK_PASS" ] && [ -n "$ROOT_TLD" ]; then
+  say "Your login — authentik, Dockhand and Pi-hole"
+  note "username: $AK_USER"
+  note "password: $AK_PASS"
+  note "(as generated — it is in $AK_ENV; change it in authentik, top right -> Settings)"
+  print_url "https://authentik.$ROOT_TLD"
+  print_url "https://pihole.$ROOT_TLD/admin/"
 fi
 
 # This is the last thing printed on purpose — the actual "click this" moment,
