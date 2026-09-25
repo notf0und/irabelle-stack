@@ -107,6 +107,17 @@ const COOKIE_PREFIX = 'dsh-auth-'; // dsh names its cookie `dsh-auth-<authority>
 const PINNED_CMD = env.DSH_CMD || null; // an explicit DSH_CMD turns version management off
 const NPX_CACHE = env.DSH_NPX_CACHE || path.join(os.homedir(), '.npm', '_npx');
 
+// dsh picks its directory picker once per boot: with a graphical session
+// (DISPLAY or WAYLAND_DISPLAY set) and zenity/kdialog on PATH it mounts the
+// *native* chooser, which opens on this host's screen. Behind the bridge that
+// is never where the user is — the browser is on Traefik, on another device —
+// so "add workspace" would spawn a dialog nobody can see and appear to do
+// nothing. Its probe treats an empty value as unset, so clearing these two for
+// the child resolves it to the in-app browse picker, which works everywhere.
+// Set DSH_NATIVE_PICKER=1 to keep the native chooser (a browser on this host).
+const NATIVE_PICKER = /^(1|true|yes)$/i.test(env.DSH_NATIVE_PICKER || '');
+const PICKER_ENV = NATIVE_PICKER ? {} : { DISPLAY: '', WAYLAND_DISPLAY: '' };
+
 // When set, every cold start resolves and downloads the tracked tag *before*
 // choosing a copy, so the instance that comes up is the newest release rather
 // than whatever a background refresh happened to fetch during the previous
@@ -423,7 +434,7 @@ function startChild(chosen) {
 
   const proc = spawn('/bin/sh', ['-c', command], {
     cwd: DSH_CWD,
-    env: { ...env, DSH_HOME },
+    env: { ...env, DSH_HOME, ...PICKER_ENV },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   child = proc;

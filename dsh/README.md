@@ -99,6 +99,14 @@ Both are visible in `dsh-web-bridge.mjs` (`rejectReason`, `upstreamHeaders`,
 bridge logs *"did not match the loopback persistence gate — passing it through
 unpatched"* and the page simply behaves as upstream intends.
 
+A third one is not a bug but a vantage point: dsh picks its **directory
+picker** once per boot, and with a graphical session and `zenity` on `PATH` it
+chooses the *native* chooser, which opens on the host's screen. Behind the
+bridge the browser is never there, so "add workspace" spawned a dialog nobody
+could see and looked like it did nothing. The bridge clears `DISPLAY` and
+`WAYLAND_DISPLAY` for the harness, which resolves to the in-app browse picker;
+`DSH_NATIVE_PICKER=1` keeps the native one for a browser on this host.
+
 ## Configuration
 
 Everything is `KEY=value` in `dsh/.env` (`dsh/.env.example` documents each
