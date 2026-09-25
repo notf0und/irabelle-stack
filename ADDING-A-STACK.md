@@ -4,13 +4,13 @@ A stack is a directory at the top of this checkout with a `compose.yml` in it.
 `setup.sh`, `update.sh`, `stacks.sh` and `fast-disk.sh` all find stacks that
 way, so none of them needs editing for a new one. What does need doing is
 below, in order. The `arr` and `books` stacks are the worked examples: when a
-step here is unclear, look at how they do it.
+step here is unclear, look at how they do it. A stack that also needs
+host-side setup adds an executable `myapp/setup.sh` — step 6b.
 
-The one exception is `dsh/`: the DeepSeek Harness refuses to bind anything but
-loopback, so it is a host systemd *user* service with a bridge in front of it,
-provisioned by `dsh/install.sh` (called from `setup.sh`) and documented in
-`dsh/README.md`. Nothing here applies to it — it has no `compose.yml`, no
-`config/`, and is not deployed from Dockhand.
+`dsh/` is the one stack with no `compose.yml`: the DeepSeek Harness refuses to
+bind anything but loopback, so it is a host systemd *user* service with a
+bridge in front of it. Its hook (`dsh/setup.sh`) asks whether to install it,
+and `dsh/install.sh` / `dsh/uninstall.sh` do the work; see `dsh/README.md`.
 
 Throughout, `myapp` is the new stack, `<TLD>` your domain (`smart`), and
 `myapp.<TLD>` the name it is published under.
@@ -220,6 +220,39 @@ The rules the existing sections keep to:
   down.
 
 It runs at the end of `setup.sh`, on every `update.sh` run, and by hand.
+
+## 6b. If it needs host-side setup — `myapp/setup.sh`
+
+A stack that needs more than `compose.yml` ships an executable `setup.sh` in
+its own directory. `./setup.sh` sources it once the base stacks are up, and it
+is runnable on its own too:
+
+```sh
+#!/usr/bin/env bash
+# myapp/setup.sh — what the myapp stack needs done on this host.
+set -euo pipefail
+REPO_DIR=${REPO_DIR:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)}
+. "$REPO_DIR/lib/host.sh"          # say/note/warn/die, env_var, host_env_get/set
+cd "$REPO_DIR"
+TMP=${TMP:-$(mktemp -d)}           # setup.sh passes its own when it sources you
+
+say "MyApp"
+# create the first-run state the image cannot (an admin user, an API key, ...),
+# starting from `if [ ! -f ... ]` so a re-run changes nothing.
+```
+
+* **the hook is the stack's own business**: everything that mentions `myapp`
+  belongs in this file, not in the root `setup.sh` — that is what keeps the
+  root script small and what makes a stack a plugin;
+* **removing the directory removes the hook**: `setup.sh` calls
+  `run_stack_hook dockhand` / `run_stack_hook dsh` for the two whose order
+  matters and then runs every other `*/setup.sh` in directory order, so a
+  deleted stack is never asked about, installed or configured;
+* **sourced, not exec'd**: the hook shares `setup.sh`'s helpers, `$TMP` and
+  variables (which is how `dockhand/setup.sh` leaves `AK_USER` behind for the
+  login summary at the end). Use `return`, not `exit`, if you need to stop it;
+* **it must be idempotent** — `setup.sh` runs it on every run, and so does
+  `update.sh`.
 
 ## 7. Deploy it
 

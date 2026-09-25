@@ -171,8 +171,10 @@ load_settings
 say "Node.js"
 if [ -z "$NODE" ]; then
   warn "node is not installed or not on PATH — the harness cannot run."
-  warn "Install Node.js 22 or newer (your distro's nodejs, or nvm), then re-run:"
-  warn "    ./dsh/install.sh"
+  warn "Install Node.js 22 or newer, then re-run this script:"
+  warn "  nvm (recommended):  https://github.com/nvm-sh/nvm   then: nvm install 22"
+  warn "  Debian/Ubuntu:      sudo apt-get install -y nodejs npm"
+  warn "  Fedora/RHEL:        sudo dnf install -y nodejs npm"
   exit 1
 fi
 NODE_MAJOR=$(node -p 'process.versions.node.split(".")[0]')
@@ -180,8 +182,90 @@ if [ "$NODE_MAJOR" -lt 20 ] 2>/dev/null; then
   warn "node $(node -v) is older than 20 — dsh may not boot."
 fi
 note "node $(node -v) at $NODE"
-command -v npm >/dev/null 2>&1 || die "npm is required (it ships with node)"
-command -v npx >/dev/null 2>&1 || die "npx is required (it ships with node)"
+
+# Node without npm is the Debian/Ubuntu split package (`nodejs` and `npm` are
+# separate), and npx comes with npm — so when one is missing, both are. Install
+# it rather than stopping: a host with node but no npm is a normal starting
+# point, not a broken one.
+run_privileged() {
+  if [ "$(id -u)" -eq 0 ]; then "$@"; return $?; fi
+  command -v sudo >/dev/null 2>&1 || return 1
+  if [ -t 0 ]; then sudo "$@"; else sudo -n "$@"; fi
+}
+
+ensure_npm() {
+  if command -v npm >/dev/null 2>&1 && command -v npx >/dev/null 2>&1; then
+    return 0
+  fi
+  warn "npm (and npx) are missing — the harness needs both."
+
+  # 1. The distro package is the persistent fix, which is what the split-package
+  #    case wants: the systemd service finds npm again after a reboot.
+  local mgr="" args=""
+  if command -v apt-get >/dev/null 2>&1; then mgr=apt-get; args="install -y npm"
+  elif command -v dnf >/dev/null 2>&1; then mgr=dnf; args="install -y npm"
+  elif command -v yum >/dev/null 2>&1; then mgr=yum; args="install -y npm"
+  elif command -v zypper >/dev/null 2>&1; then mgr=zypper; args="--non-interactive install npm"
+  elif command -v pacman >/dev/null 2>&1; then mgr=pacman; args="-S --noconfirm npm"
+  elif command -v apk >/dev/null 2>&1; then mgr=apk; args="add npm"
+  fi
+  if [ -n "$mgr" ]; then
+    note "installing it with: $mgr $args"
+    # shellcheck disable=SC2086 -- args is an intentional word list
+    if run_privileged "$mgr" $args; then
+      hash -r 2>/dev/null || true
+      if command -v npm >/dev/null 2>&1 && command -v npx >/dev/null 2>&1; then
+        note "npm $(npm --version) installed"
+        return 0
+      fi
+    fi
+    warn "$mgr could not install npm"
+  fi
+
+  # 2. No package manager, or it failed: fetch npm itself. Node ships npm, and
+  #    the registry tarball is the same artifact, so this works from a bare
+  #    `node` — no sudo, and nothing to undo. `latest` first, then 10.x: an npm
+  #    major can require a newer Node than this host runs, and the shims are
+  #    only useful if the npm behind them actually executes.
+  if command -v curl >/dev/null 2>&1 && command -v tar >/dev/null 2>&1; then
+    local root="$HOME/.local/share/dsh-npm" shim="$HOME/.local/bin" want ver tool
+    mkdir -p "$root" "$shim"
+    for want in latest 10.9.4; do
+      ver=$(curl -fsSL "https://registry.npmjs.org/npm/$want" 2>/dev/null \
+        | node -e 'let s="";process.stdin.on("data",c=>s+=c).on("end",()=>{try{process.stdout.write(JSON.parse(s).version||"")}catch{}})')
+      [ -n "$ver" ] || continue
+      note "fetching npm $ver from the registry"
+      rm -rf "$root/package"
+      curl -fsSL "https://registry.npmjs.org/npm/-/npm-$ver.tgz" 2>/dev/null | tar xz -C "$root" 2>/dev/null || continue
+      for tool in npm npx; do
+        cat >"$shim/$tool" <<EOF
+#!/bin/sh
+exec "$NODE" "$root/package/bin/${tool}-cli.js" "\$@"
+EOF
+        chmod +x "$shim/$tool"
+      done
+      PATH="$shim:$PATH"
+      export PATH
+      hash -r 2>/dev/null || true
+      if npm --version >/dev/null 2>&1; then
+        note "npm $ver installed for $(id -un) in $shim"
+        return 0
+      fi
+      warn "npm $ver does not run on node $(node -v) — trying an older major"
+    done
+  fi
+
+  warn "could not install npm automatically."
+  warn "Install it by hand, then re-run this script:"
+  warn "  Debian/Ubuntu:  sudo apt-get install -y npm"
+  warn "  Fedora/RHEL:    sudo dnf install -y npm"
+  warn "  or install Node.js 22+ with nvm, which includes npm:"
+  warn "  https://github.com/nvm-sh/nvm"
+  return 1
+}
+
+ensure_npm || exit 1
+note "npm $(npm --version), npx $(command -v npx)"
 
 # dsh-mobile's installer materializes the profile with pnpm. If pnpm is absent,
 # put a shim on PATH that forwards to npx rather than failing the whole install.

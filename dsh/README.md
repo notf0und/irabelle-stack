@@ -40,8 +40,11 @@ Idempotent, safe to re-run:
 
 1. creates `dsh/.env` from `dsh/.env.example`, taking the TLD from the root
    `.env` (and appending any key a newer template gained);
-2. checks Node.js (20+; 22+ recommended) and, if `pnpm` is missing, uses a
-   temporary `npx pnpm` shim for the plugin install;
+2. checks Node.js (20+; 22+ recommended) and **installs npm when it is
+   missing** — first through the distro's package manager, then by fetching
+   npm's own tarball — since Debian/Ubuntu ship `nodejs` and `npm` separately
+   and npx comes with npm. If `pnpm` is missing it uses a temporary
+   `npx pnpm` shim for the plugin install;
 3. bootstraps the DSH profile (`~/.dsh/profiles/web`) and seeds the `npx`
    cache the bridge reads;
 4. clones/updates [dsh-mobile][] into `dsh/.dsh-mobile` and installs it into
@@ -58,9 +61,42 @@ authentik worker on start. Nothing in `dsh/` needs to touch the UI.
 ```sh
 ./setup.sh                 # asks whether to install it (once; answer in host.env)
 ./setup.sh --dsh           # install it without the question
+./dsh/setup.sh             # just this stack's hook — asks the same question
 ./dsh/install.sh           # install/refresh directly, after editing dsh/.env
 ./dsh/install.sh --status  # what is installed, changing nothing
+./dsh/uninstall.sh         # remove it (--purge also deletes ~/.dsh and dsh/.env)
 ```
+
+`dsh/setup.sh` is the hook `./setup.sh` sources (see
+[Adding a stack](../ADDING-A-STACK.md)); `dsh/install.sh` is safe to run on its
+own and `dsh/uninstall.sh` is its inverse — it removes the unit, the route, the
+certificate and the plugin, and leaves `~/.dsh` alone unless you pass
+`--purge`.
+
+### Behind a hostname, not loopback
+
+Two DSH behaviours assume the browser is on `localhost`, and both are handled
+in the bridge rather than by asking you to use an SSH tunnel:
+
+* **Settings → Models** used to fail with *"settings are unavailable in this
+  browser"*. The settings client picks its persistence with
+  `ctx.remote.$host.isLoopback ? "host" : "memory"`, and `isLoopback` comes
+  from the address bar, so any `https://dsh.<TLD>` origin is born unusable.
+  The bridge serves that one bundle with the gate forced open (the Host-side
+  settings API has no such gate, and the request still crosses authentik, the
+  trusted-Host fence and dsh's signed cookie).
+* **Plugins that mutate through their own routes** (dshmarket's update button,
+  for one) refuse a request whose `Host` is not a loopback authority, and
+  compare `Origin` against it. The bridge decides trust itself — Host must be
+  the public name, Origin must match, cross-site is refused — then forwards
+  with the loopback authority and without `Origin`, which is what those
+  plugins check. Without the bridge-side check this would be a CSRF hole,
+  because their routes carry no cookie of their own.
+
+Both are visible in `dsh-web-bridge.mjs` (`rejectReason`, `upstreamHeaders`,
+`serveSettingsBundle`). If a future dsh release changes either assumption, the
+bridge logs *"did not match the loopback persistence gate — passing it through
+unpatched"* and the page simply behaves as upstream intends.
 
 ## Configuration
 
@@ -140,6 +176,9 @@ page saying so and resumes once that one exits.
 | "This app cannot be installed" | the device does not trust the root CA, or the bridge is not running with its `icons/` directory |
 | "Starting…" page never finishes | `journalctl --user -u dsh-web -f`; usually the port is taken or dsh fails to boot |
 | Plugin not visible on a phone | the roster was composed before it was installed — let the harness idle out, or restart the service |
+| Settings → Models says *"settings are unavailable in this browser"* | dsh's own settings gate — the bridge should have forced it open and logged *"serving settings bundle with host persistence forced"*; if it logged *"did not match"*, upstream changed the bundle |
+| A plugin's update/save button says *"untrusted origin"* | the bridge normalizes Host/Origin for the mutating routes; if you still see it, a dashboard or client is bypassing `dsh.$TLD` |
+| npm is missing on the host | `./dsh/install.sh` installs it; if that failed, see the warning it printed (needs sudo, or `curl`+`tar` for the tarball fallback) |
 
 [dsh-mobile]: https://github.com/notf0und/dsh-mobile
 [pwa]: https://github.com/deepseek-ai/deepseek-harness/discussions/3736

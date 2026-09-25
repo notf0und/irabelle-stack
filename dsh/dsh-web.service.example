@@ -26,7 +26,7 @@ Type=simple
 WorkingDirectory=@DSH_CWD@
 Environment=HOME=@HOME@
 Environment=DSH_HOME=@DSH_HOME@
-Environment=PATH=@NODE_DIR@:/usr/local/bin:/usr/bin:/bin
+Environment=PATH=@NODE_DIR@:@HOME@/.local/bin:/usr/local/bin:/usr/bin:/bin
 # The bridge listens on the Docker gateway so the Traefik container can reach
 # it, while dsh itself stays on 127.0.0.1 (it refuses to bind anything else).
 Environment=LISTEN_HOST=@LISTEN_HOST@

@@ -35,6 +35,7 @@ want and ignore the rest.
 │       └── cert-watcher.sh
 ├── dockhand/
 │   ├── compose.yml                  # reads ${TLD} from .env
+│   ├── setup.sh                     # its hook: start, baseline, and single sign-on
 │   └── config/dockhand/             # runtime state, not in git
 ├── authentik/
 │   ├── compose.yml                  # server + worker + postgres; the forward-auth middleware
@@ -54,6 +55,7 @@ want and ignore the rest.
 │           ├── unbound.conf.example     # recursive resolver; setup.sh copies it
 │           └── unbound.conf             # your copy — not in git
 ├── integrations.py                  # wires the media apps together (run by setup.sh)
+├── lib/host.sh                      # helpers shared by setup.sh and every stack hook
 ├── fast-disk.sh                     # keeps every config/ on an SSD, same paths (sudo)
 ├── ADDING-A-STACK.md                # step by step, for a new stack
 ├── arr/
@@ -103,10 +105,12 @@ want and ignore the rest.
 ├── mail/                            # Mailpit (SMTP catcher, optional relay)
 ├── ai/compose.yml                   # Ollama; models in ai/models/, not config/
 ├── dsh/                             # DeepSeek Harness — a HOST service, not a
-│   ├── install.sh                   #   stack (no compose.yml): install.sh runs
-│   ├── dsh-web-bridge.mjs           #   it as a systemd user service, renders the
-│   ├── dsh-web.service.example      #   dsh.$TLD route behind authentik, and
-│   ├── traefik/dsh.yml              #   installs dsh-mobile into its profile
+│   ├── setup.sh                     #   stack (no compose.yml): its hook asks
+│   ├── install.sh                   #   whether to install it, then runs it as a
+│   ├── uninstall.sh                 #   systemd user service; uninstall.sh undoes
+│   ├── dsh-web-bridge.mjs           #   that, and renders the dsh.$TLD route
+│   ├── dsh-web.service.example      #   behind authentik with the dsh-mobile
+│   ├── traefik/dsh.yml              #   plugin installed
 │   ├── icons/                       #   PWA icons the bridge injects
 │   └── .env.example                 #   harness settings; dsh/.env is gitignored
 └── downloads/                       # media tree shared by arr, books and plex,
@@ -730,7 +734,8 @@ the bridge through `host.docker.internal`, exactly as the `plex` and `glances`
 stacks reach their host-network containers. The upside is that the agent runs as
 you, on this host, with your real checkouts and tools.
 
-`dsh/install.sh` owns the whole install and is idempotent. Installing it is
+`dsh/setup.sh` is the stack's hook (the question lives with the stack now);
+`dsh/install.sh` owns the install and is idempotent. Installing it is
 **opt-in**: `setup.sh` asks on its first run and remembers the answer in
 `host.env` as `DSH_INSTALL` (`yes`/`no`), because a host user service and a
 Node.js dependency are a real choice — `--dsh` / `--no-dsh` answer without
@@ -741,15 +746,24 @@ being asked.
 ./setup.sh --dsh           # install it, no question
 ./dsh/install.sh           # install/refresh directly, after editing dsh/.env
 ./dsh/install.sh --status  # node / profile / plugin / service / route
+./dsh/uninstall.sh         # remove it (--purge also deletes ~/.dsh and dsh/.env)
 ```
 
-It creates `dsh/.env` (TLD from the root `.env`), bootstraps the DSH profile,
-clones and installs `dsh-mobile`, renders and starts the systemd user service,
-enables lingering so it survives logging out of SSH, and renders
-`traefik/config/certificates/dsh.yml` — the route in Traefik's file provider.
-The authentik half is the `dsh-provider` forward-auth provider in the blueprint
-above. `update.sh` only ever **refreshes an install that already exists**
-(`--no-restart`), so nothing installs dsh behind your back.
+It creates `dsh/.env` (TLD from the root `.env`), installs npm if the host has
+Node without it, bootstraps the DSH profile, clones and installs `dsh-mobile`,
+renders and starts the systemd user service, enables lingering so it survives
+logging out of SSH, and renders `traefik/config/certificates/dsh.yml` — the
+route in Traefik's file provider. The authentik half is the `dsh-provider`
+forward-auth provider in the blueprint above. `update.sh` only ever
+**refreshes an install that already exists** (`--no-restart`), so nothing
+installs dsh behind your back.
+
+The bridge in front of it (`dsh/dsh-web-bridge.mjs`) also makes DSH behave
+behind a hostname rather than on loopback: it opens the settings page's
+loopback-only gate, and it normalizes `Host`/`Origin` — after checking them
+itself — so plugins whose own routes require a loopback authority (dshmarket's
+update button) work through `https://dsh.$TLD`. See
+[dsh/README.md](dsh/README.md#behind-a-hostname-not-loopback).
 
 Two things worth knowing:
 
@@ -1104,6 +1118,13 @@ deploying it. In short: a directory with a `compose.yml` is a stack, and every
 script here picks it up on its own; state goes in its `config/`, it joins
 `app-bridge`, it is published as `<name>.<TLD>` behind authentik, and it is
 deployed from Dockhand.
+
+Anything a stack needs done **on the host** — first-run state, a login, a
+question — goes in an executable `<name>/setup.sh`. `setup.sh` sources those
+hooks after the base stacks are up (the shared helpers are in `lib/host.sh`),
+so a stack's setup lives with the stack and removing its directory removes the
+hook with it. `dockhand/setup.sh` (start + baseline + single sign-on) and
+`dsh/setup.sh` (the opt-in harness) are the two that exist today.
 
 ## Repository hygiene
 

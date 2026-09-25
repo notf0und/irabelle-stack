@@ -710,6 +710,63 @@ function fixCookie(header) {
   return header.replace(/SameSite=Strict/gi, 'SameSite=Lax');
 }
 
+// ── reverse-proxy trust and header normalization ───────────────────────────
+//
+// Traefik terminates TLS for PUBLIC_HOST and the bridge forwards to dsh on
+// loopback. Several DSH plugins — dshmarket's mutating routes among them —
+// require the request's Host to be a *loopback* authority and compare Origin
+// against it, which a browser at https://PUBLIC_HOST can never satisfy. The
+// bridge therefore makes the trust decision here, where it can: the Host must
+// be the public name (or a loopback / the bridge's own listen address), an
+// Origin, when present, must match that Host, and a cross-site request is
+// refused. Only then does it normalize what the upstream sees — Host to the
+// loopback authority and Origin removed — which is what those plugins check.
+//
+// Doing the check here is not optional: dshmarket's routes have no cookie gate
+// of their own, so removing Origin without a bridge-side decision would turn
+// the normalization into a CSRF hole. dsh's own /api keeps its signed cookie
+// as a second layer.
+function authorityHostname(authority) {
+  if (authority === undefined || authority === null) return undefined;
+  const lower = String(authority).toLowerCase();
+  if (lower.startsWith('[')) return lower.slice(0, lower.indexOf(']') + 1);
+  return lower.split(':')[0];
+}
+
+function isAllowedAuthority(host) {
+  const name = authorityHostname(host);
+  if (name === undefined || name === '') return false;
+  if (name === authorityHostname(PUBLIC_HOST)) return true;
+  if (name === 'localhost' || name === '127.0.0.1' || name === '[::1]') return true;
+  if (/^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/u.test(name)) return true;
+  // The bridge's own listen address, where /__bridge/status is read from this
+  // host or a neighbouring container (never from a browser on the LAN).
+  return name === authorityHostname(LISTEN_HOST);
+}
+
+/** null when the request may be proxied, else a short reason for the 403. */
+function rejectReason(req) {
+  const host = req.headers.host;
+  if (!isAllowedAuthority(host)) return `Host ${host ?? '(none)'} is not ${PUBLIC_HOST}`;
+  if (String(req.headers['sec-fetch-site'] ?? '').toLowerCase() === 'cross-site') return 'cross-site request';
+  const origin = req.headers.origin;
+  if (origin !== undefined) {
+    let originHost;
+    try { originHost = new URL(origin).hostname; } catch { return `unparseable Origin ${origin}`; }
+    if (originHost.toLowerCase() !== authorityHostname(host)) return `Origin ${origin} does not match Host ${host}`;
+  }
+  return null;
+}
+
+/** Upstream headers, with the authority dsh and its plugins expect. */
+function upstreamHeaders(req) {
+  const headers = { ...req.headers };
+  headers.host = `${UPSTREAM_HOST}:${UPSTREAM_PORT}`;
+  headers['x-forwarded-host'] = req.headers.host ?? PUBLIC_HOST;
+  delete headers.origin;
+  return headers;
+}
+
 /** Serve one of the bridge's own PNG icons (referenced from the patched manifest). */
 function serveIcon(res, name) {
   const file = path.join(ICON_DIR, name);
@@ -748,7 +805,7 @@ function needsRasterIcons(manifest) {
  * decoded defensively in case a server compresses regardless.
  */
 function serveManifest(req, res) {
-  const requestHeaders = { ...req.headers, host: req.headers.host };
+  const requestHeaders = upstreamHeaders(req);
   delete requestHeaders['accept-encoding'];
   const upstream = http.request(
     {
@@ -825,6 +882,91 @@ function serveManifest(req, res) {
   upstream.end();
 }
 
+// ── settings on a non-loopback origin ──────────────────────────────────────
+//
+// The settings UI refuses to talk to the Host from any page whose address-bar
+// hostname is not loopback: @deepseek-ai/dsh-client-ui-settings picks its
+// persistence with `ctx.remote.$host.isLoopback ? "host" : "memory"`, and in
+// "memory" mode the settings mirror is born `unavailable` and never issues a
+// read. That is why Settings -> Models fails with "settings are unavailable
+// in this browser" at https://PUBLIC_HOST — and why the Host-header trick
+// above cannot help: `isLoopback` is derived in the browser from
+// `location.hostname`, never from the request.
+//
+// The durable fix is to serve that one bundle with the gate forced open. The
+// Host-side settings controller has no loopback gate of its own, and the
+// request still crosses the same trusted-Host fence, authentik and the signed
+// dsh cookie, so this does not widen who can reach the API — it only stops
+// the page from disabling itself. Patching here survives dsh upgrades, which
+// re-download the package and would wipe an edit inside it.
+const SETTINGS_BUNDLE_RE = /\/plugins\/(?:[^/]+\/)?dsh-client-ui-settings\/client\.js$/u;
+const PERSISTENCE_GATE_RE = /ctx\.remote\.\$host\.isLoopback\s*\?\s*"host"\s*:\s*"memory"/u;
+
+function patchSettingsBundle(body) {
+  const text = body.toString('utf8');
+  if (!PERSISTENCE_GATE_RE.test(text)) return undefined;
+  return Buffer.from(text.replace(PERSISTENCE_GATE_RE, '"host"'), 'utf8');
+}
+
+function serveSettingsBundle(req, res) {
+  const requestHeaders = upstreamHeaders(req);
+  delete requestHeaders['accept-encoding'];
+  const upstream = http.request(
+    {
+      host: UPSTREAM_HOST,
+      port: UPSTREAM_PORT,
+      method: 'GET',
+      path: req.url,
+      headers: requestHeaders,
+    },
+    (upstreamRes) => {
+      const chunks = [];
+      upstreamRes.on('data', (chunk) => chunks.push(chunk));
+      upstreamRes.on('end', () => {
+        const raw = Buffer.concat(chunks);
+        const headers = { ...upstreamRes.headers };
+        const status = upstreamRes.statusCode || 502;
+        const encoding = String(headers['content-encoding'] ?? '').toLowerCase();
+        let body = raw;
+        if (status === 200 && encoding !== '' && encoding !== 'identity') {
+          const inflate = {
+            gzip: zlib.gunzipSync,
+            deflate: zlib.inflateSync,
+            br: zlib.brotliDecompressSync,
+          }[encoding];
+          if (inflate !== undefined) {
+            try { body = inflate(raw); } catch { body = raw; }
+          }
+        }
+        let output = body;
+        if (status === 200) {
+          const patched = patchSettingsBundle(body);
+          if (patched === undefined) {
+            log('settings bundle did not match the loopback persistence gate — passing it through unpatched');
+          } else {
+            output = patched;
+            log('serving settings bundle with host persistence forced (non-loopback browser)');
+          }
+        }
+        delete headers['content-length'];
+        delete headers['content-encoding'];
+        res.writeHead(status, {
+          ...headers,
+          'content-length': String(output.length),
+          'cache-control': 'no-store',
+        });
+        res.end(output);
+      });
+    },
+  );
+  upstream.on('error', (error) => {
+    log(`settings bundle upstream error: ${error.message}`);
+    if (!res.headersSent) res.writeHead(502, { 'content-type': 'text/plain' });
+    if (!res.writableEnded) res.end('dsh web upstream error\n');
+  });
+  upstream.end();
+}
+
 /**
  * Proxy one HTTP request upstream. When dsh answers 401 for the index even
  * though the browser sent a cookie (stale cookie, rotated signing secret, or a
@@ -840,7 +982,7 @@ function forward(req, res, upstreamPath, injected, allowRetry) {
       port: UPSTREAM_PORT,
       method: req.method,
       path: upstreamPath,
-      headers: { ...req.headers, host: req.headers.host },
+      headers: upstreamHeaders(req),
     },
     (upstreamRes) => {
       if (upstreamRes.statusCode === 401 && retryable && !injected && token !== null) {
@@ -904,6 +1046,18 @@ function statusPayload() {
 // ── HTTP proxy ─────────────────────────────────────────────────────────────
 
 const server = http.createServer((req, res) => {
+  // The trust decision for everything below. A request that did not arrive for
+  // PUBLIC_HOST (or, for diagnostics, a loopback or the bridge's own listen
+  // address) never reaches dsh — and only after this check does the upstream
+  // request get a loopback Host with Origin removed.
+  const rejected = rejectReason(req);
+  if (rejected !== null) {
+    log(`refusing ${req.method ?? '?'} ${req.url ?? '?'}: ${rejected}`);
+    res.writeHead(403, { 'content-type': 'text/plain', 'cache-control': 'no-store' });
+    res.end('forbidden\n');
+    return;
+  }
+
   if (req.url !== undefined && req.url.startsWith('/__bridge/')) {
     const iconName = ICON_BY_PATH.get(req.url.split('?')[0]);
     if (iconName !== undefined) {
@@ -933,27 +1087,41 @@ const server = http.createServer((req, res) => {
   // Auto-auth: dsh only admits a browser through its one-time token URL. When
   // the browser has no auth cookie yet, replay the token upstream on its behalf
   // and relay dsh's 303 + Set-Cookie. The token never reaches the address bar.
-  const authority = authorityOf(req.headers.host);
+  // dsh mints the cookie for the authority it sees, which is now the loopback
+  // one the bridge forwards, so look for that name first — and for the public
+  // one too, so a browser that still holds a pre-normalization cookie is not
+  // re-injected on every load.
+  const publicAuthority = authorityOf(req.headers.host);
+  const upstreamAuthority = authorityOf(`${UPSTREAM_HOST}:${UPSTREAM_PORT}`);
+  const cookieNames = [...new Set(
+    [upstreamAuthority, publicAuthority].filter((a) => a !== undefined).map(cookieNameFor),
+  )];
   const cookies = String(req.headers.cookie || '');
-  const authCookieName = authority === undefined ? undefined : cookieNameFor(authority);
-  const hasCookie = authCookieName !== undefined && cookieValueOf(cookies, authCookieName) !== undefined;
+  const hasCookie = cookieNames.some((name) => cookieValueOf(cookies, name) !== undefined);
   const url = new URL(req.url || '/', 'http://placeholder');
   let upstreamPath = req.url;
   let injected = false;
   if (
     token !== null && !hasCookie && req.method === 'GET' && url.pathname === '/' &&
-    !url.searchParams.has('token') && authCookieName !== undefined &&
+    !url.searchParams.has('token') && cookieNames.length > 0 &&
     injectAllowed(req.socket.remoteAddress || '?')
   ) {
     upstreamPath = `/?token=${encodeURIComponent(token)}`;
     injected = true;
-    log(`auto-authenticating ${authority ?? '?'} (no ${authCookieName ?? 'cookie'} yet)`);
+    log(`auto-authenticating ${upstreamAuthority ?? '?'} (no dsh-auth cookie yet)`);
   }
 
   // dsh ships an SVG-only manifest icon, which Chrome parses as 0x0 and refuses
   // to install; swap in real raster icons so "Install app" works.
   if (iconsAvailable && req.method === 'GET' && url.pathname === MANIFEST_PATH) {
     serveManifest(req, res);
+    return;
+  }
+
+  // Settings -> Models disables itself on a non-loopback origin; serve that one
+  // bundle with the gate opened. See the note on patchSettingsBundle above.
+  if (req.method === 'GET' && SETTINGS_BUNDLE_RE.test(url.pathname)) {
+    serveSettingsBundle(req, res);
     return;
   }
 
@@ -966,6 +1134,15 @@ const server = http.createServer((req, res) => {
 
 server.on('upgrade', (req, socket, head) => {
   lastRequestAt = Date.now();
+  // Same trust decision as the HTTP path, and the same normalization: dsh's
+  // WebSocket fence compares Origin to Host too, so the handshake must reach it
+  // with the loopback authority and without the browser's Origin.
+  const rejected = rejectReason(req);
+  if (rejected !== null) {
+    log(`refusing upgrade ${req.url ?? '?'}: ${rejected}`);
+    socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
+    return;
+  }
   if (!ready) {
     socket.end('HTTP/1.1 503 Service Unavailable\r\nRetry-After: 3\r\n\r\n');
     return;
@@ -973,9 +1150,16 @@ server.on('upgrade', (req, socket, head) => {
   const upstream = net.connect(UPSTREAM_PORT, UPSTREAM_HOST, () => {
     let raw = `${req.method} ${req.url} HTTP/1.1\r\n`;
     for (let i = 0; i < req.rawHeaders.length; i += 2) {
-      raw += `${req.rawHeaders[i]}: ${req.rawHeaders[i + 1]}\r\n`;
+      const name = req.rawHeaders[i];
+      const lower = String(name).toLowerCase();
+      if (lower === 'host') {
+        raw += `${name}: ${UPSTREAM_HOST}:${UPSTREAM_PORT}\r\n`;
+        continue;
+      }
+      if (lower === 'origin') continue;
+      raw += `${name}: ${req.rawHeaders[i + 1]}\r\n`;
     }
-    raw += '\r\n';
+    raw += `X-Forwarded-Host: ${req.headers.host ?? PUBLIC_HOST}\r\n\r\n`;
     upstream.write(raw);
     if (head !== undefined && head.length > 0) upstream.write(head);
     upstream.pipe(socket);
