@@ -1,0 +1,53 @@
+# dsh stack — systemd USER unit for the DeepSeek Harness web bridge.
+#
+# This is a TEMPLATE. ./dsh/install.sh renders it with this host's values
+# (node path, checkout path, dsh.$TLD, dsh/.env settings) into
+#
+#   ~/.config/systemd/user/dsh-web.service
+#
+# then reloads and (re)starts it. Edit dsh/.env for settings, or the rendered
+# unit for a one-off change — re-running ./dsh/install.sh regenerates the unit
+# from dsh/.env.
+#
+# A user unit needs lingering, or systemd tears it down when your last login
+# session ends (which shows up in the browser as 502 after logging out of SSH).
+# install.sh enables it; check it with:
+#
+#   loginctl show-user "$USER" -p Linger     # want Linger=yes
+
+[Unit]
+Description=DeepSeek Harness web GUI (dsh.@TLD@ via Traefik/Authentik, on-demand)
+Documentation=file:@REPO_DIR@/dsh/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=@DSH_CWD@
+Environment=HOME=@HOME@
+Environment=DSH_HOME=@DSH_HOME@
+Environment=PATH=@NODE_DIR@:/usr/local/bin:/usr/bin:/bin
+# The bridge listens on the Docker gateway so the Traefik container can reach
+# it, while dsh itself stays on 127.0.0.1 (it refuses to bind anything else).
+Environment=LISTEN_HOST=@LISTEN_HOST@
+Environment=LISTEN_PORT=@LISTEN_PORT@
+Environment=UPSTREAM_PORT=@LISTEN_PORT@
+Environment=PUBLIC_HOST=@PUBLIC_HOST@
+# Stop dsh after this many minutes with no browser connection, no session
+# activity and no running tool. Set to 0 to keep it running once started.
+Environment=IDLE_MINUTES=@IDLE_MINUTES@
+# Version management: track this dist-tag. DSH_REFRESH_ON_START resolves it
+# before every cold start so each instance is the newest release; UPDATE_HOURS
+# is the background check while running.
+Environment=DSH_UPDATE_TAG=@DSH_UPDATE_TAG@
+Environment=DSH_REFRESH_ON_START=@DSH_REFRESH_ON_START@
+Environment=UPDATE_HOURS=@UPDATE_HOURS@
+Environment=READY_TIMEOUT_S=150
+ExecStart=@NODE@ @REPO_DIR@/dsh/dsh-web-bridge.mjs
+Restart=always
+RestartSec=3
+TimeoutStopSec=15
+KillMode=mixed
+
+[Install]
+WantedBy=default.target

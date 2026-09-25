@@ -11,7 +11,7 @@
 #   * Pi-hole and the apps without a login of their own (Sonarr, Radarr,
 #     Prowlarr, Bazarr, Transmission, Lingarr, Byparr, Calibre, Calibre-Web,
 #     Zigbee2MQTT, ESPHome, VoiceBM, Threadfin, Glances, Mailpit, Ollama,
-#     Traefik's dashboard, SearXNG, n8n):
+#     Traefik's dashboard, SearXNG, n8n, the DeepSeek Harness at dsh.$TLD):
 #     forward-auth proxy providers, served by the embedded outpost that
 #     Traefik's `authentik` middleware talks to
 #   * Kavita, Shelfmark and Cleanuparr: OIDC clients, like Dockhand's;
@@ -793,6 +793,37 @@ entries:
     attrs:
       order: 0
 
+  # --- dsh: forward auth -------------------------------------------------------
+  # The DeepSeek Harness is a host service, not a container (see dsh/README.md):
+  # dsh/install.sh runs it as a systemd user service and Traefik dials its
+  # bridge through host.docker.internal. The harness's own one-time token is
+  # replayed by that bridge, so what a browser needs in front is authentik —
+  # the same forward_single treatment as Pi-hole.
+  - model: authentik_providers_proxy.proxyprovider
+    id: dsh-provider
+    identifiers:
+      name: DeepSeek Harness
+    attrs:
+      authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-implicit-consent]]
+      invalidation_flow: !Find [authentik_flows.flow, [slug, default-provider-invalidation-flow]]
+      mode: forward_single
+      external_host: !Format ["https://dsh.%s", !Context tld]
+  - model: authentik_core.application
+    id: dsh-app
+    identifiers:
+      slug: dsh
+    attrs:
+      name: DeepSeek Harness
+      provider: !KeyOf dsh-provider
+      meta_launch_url: !Format ["https://dsh.%s/", !Context tld]
+      policy_engine_mode: any
+  - model: authentik_policies.policybinding
+    identifiers:
+      target: !KeyOf dsh-app
+      group: !Find [authentik_core.group, [name, authentik Admins]]
+    attrs:
+      order: 0
+
   # The embedded outpost runs inside the authentik container and is what answers the
   # middleware. It only serves the providers listed here, so every
   # forward-auth provider above must be added to this list too.
@@ -823,6 +854,7 @@ entries:
         - !KeyOf traefik-provider
         - !KeyOf searxng-provider
         - !KeyOf n8n-provider
+        - !KeyOf dsh-provider
       config:
         # Where the outpost sends a browser to log in. Without it, it guesses
         # from the request, which inside Docker is the container's own name.

@@ -6,6 +6,12 @@ way, so none of them needs editing for a new one. What does need doing is
 below, in order. The `arr` and `books` stacks are the worked examples: when a
 step here is unclear, look at how they do it.
 
+The one exception is `dsh/`: the DeepSeek Harness refuses to bind anything but
+loopback, so it is a host systemd *user* service with a bridge in front of it,
+provisioned by `dsh/install.sh` (called from `setup.sh`) and documented in
+`dsh/README.md`. Nothing here applies to it — it has no `compose.yml`, no
+`config/`, and is not deployed from Dockhand.
+
 Throughout, `myapp` is the new stack, `<TLD>` your domain (`smart`), and
 `myapp.<TLD>` the name it is published under.
 

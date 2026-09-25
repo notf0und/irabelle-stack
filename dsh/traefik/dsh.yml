@@ -1,0 +1,59 @@
+# dsh — the DeepSeek Harness, published at dsh.<TLD> behind authentik.
+#
+# This is a TEMPLATE. ./dsh/install.sh renders it (replacing the host and port
+# tokens below) into
+#
+#   traefik/config/certificates/dsh.yml
+#
+# which is Traefik's file provider directory (watch: true in traefik.yml), and
+# is gitignored because everything else in that directory is generated TLS
+# material. Edit the template, not the rendered copy; re-run ./dsh/install.sh.
+#
+# The harness is NOT a container. dsh/install.sh runs a host systemd user
+# service whose bridge listens on the Docker gateway, and this route dials it
+# through host.docker.internal, which traefik/compose.yml maps to the host.
+# See dsh/README.md.
+http:
+  routers:
+    dsh:
+      rule: Host(`dsh.@TLD@`)
+      entryPoints: [web]
+      middlewares: [dsh-redirect]
+      service: dsh
+
+    dsh-https:
+      rule: Host(`dsh.@TLD@`)
+      entryPoints: [websecure]
+      middlewares: [authentik@docker]
+      service: dsh
+      tls: {}
+
+    # PWA assets must bypass forward-auth: Chrome fetches a manifest and its
+    # icons WITHOUT credentials, so authentik would answer 302 and the app
+    # could never be installed. Static, non-sensitive files only.
+    dsh-pwa:
+      rule: Host(`dsh.@TLD@`) && (Path(`/manifest.webmanifest`) || Path(`/favicon.svg`) || PathPrefix(`/__bridge/icon-`))
+      entryPoints: [websecure]
+      middlewares: [dsh-pwa-plain]
+      service: dsh
+      tls: {}
+      priority: 1000
+
+  services:
+    dsh:
+      loadBalancer:
+        servers:
+          - url: http://host.docker.internal:@LISTEN_PORT@
+
+  middlewares:
+    dsh-redirect:
+      redirectScheme:
+        scheme: https
+
+    # dsh gzips the manifest when asked, and a gzipped body cannot be
+    # rewritten, which silently defeats the bridge's PWA icon shim. Ask for
+    # plain bytes on those paths.
+    dsh-pwa-plain:
+      headers:
+        customRequestHeaders:
+          Accept-Encoding: identity

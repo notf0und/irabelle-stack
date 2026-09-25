@@ -1131,6 +1131,19 @@ chmod +x "$REPO_DIR/integrations.py" 2>/dev/null || true
 python3 "$REPO_DIR/integrations.py" \
   || warn "wiring the apps together failed part-way — re-run: ./integrations.py"
 
+# --- the DeepSeek Harness (a host service, not a stack) -----------------------
+# dsh is deliberately not a container: `dsh web` refuses to bind anything but
+# loopback, so dsh/install.sh runs a systemd *user* service whose bridge Traefik
+# dials through host.docker.internal, and renders the dsh.$TLD route into
+# Traefik's file provider. Its authentik login is a forward-auth provider in the
+# blueprint, applied with the rest of authentik above. It needs Node.js on this
+# host; without it install.sh explains what to install and exits, which must not
+# fail the rest of setup.
+if [ -x "$REPO_DIR/dsh/install.sh" ]; then
+  "$REPO_DIR/dsh/install.sh" \
+    || warn "dsh is not fully set up — see the message above, then: ./dsh/install.sh"
+fi
+
 # --- scheduled jobs ----------------------------------------------------------
 say "Scheduled jobs"
 install_cron() {

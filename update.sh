@@ -170,6 +170,17 @@ if [ "$DRY_RUN" = 0 ] && [ "$DO_INTEGRATIONS" = 1 ] && [ -f "$REPO_DIR/integrati
     || echo "integrations.py failed part-way — run it by hand: $REPO_DIR/integrations.py" >&2
 fi
 
+# --- the DeepSeek Harness (a host service, not a stack) ------------------------
+# dsh is not a container (see dsh/install.sh): refresh its files and its
+# dsh-mobile copy on every update. --no-restart on purpose — this runs from
+# cron, where there is no user D-Bus to talk to, and a restart would kill any
+# turn in flight. The bridge cold-starts the harness on the next request, which
+# is when a refreshed plugin takes effect.
+if [ "$DRY_RUN" = 0 ] && [ -x "$REPO_DIR/dsh/install.sh" ]; then
+  "$REPO_DIR/dsh/install.sh" --no-restart \
+    || echo "dsh/install.sh failed — run it by hand: $REPO_DIR/dsh/install.sh" >&2
+fi
+
 say "Dockhand at $DOCKHAND_URL"
 api GET /api/environments >"$TMP/envs.json" \
   || die "cannot reach the Dockhand API at $DOCKHAND_URL"

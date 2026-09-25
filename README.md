@@ -102,6 +102,13 @@ want and ignore the rest.
 ├── monitoring/compose.yml           # Glances
 ├── mail/                            # Mailpit (SMTP catcher, optional relay)
 ├── ai/compose.yml                   # Ollama; models in ai/models/, not config/
+├── dsh/                             # DeepSeek Harness — a HOST service, not a
+│   ├── install.sh                   #   stack (no compose.yml): install.sh runs
+│   ├── dsh-web-bridge.mjs           #   it as a systemd user service, renders the
+│   ├── dsh-web.service.example      #   dsh.$TLD route behind authentik, and
+│   ├── traefik/dsh.yml              #   installs dsh-mobile into its profile
+│   ├── icons/                       #   PWA icons the bridge injects
+│   └── .env.example                 #   harness settings; dsh/.env is gitignored
 └── downloads/                       # media tree shared by arr, books and plex,
     ├── movies/                      #   at /data/downloads in every container
     ├── tv/                          #   → libraries — data, not in git
@@ -119,7 +126,8 @@ directly under `{stack}/config/`.
 Every immediate subdirectory that contains a `compose.yml` is a **stack**.
 `setup.sh` discovers them, so adding a stack means adding a directory — no
 script changes. A stack may also ship its own `.env.example` (see
-[Configuration](#configuration)).
+[Configuration](#configuration)). `dsh/` is the one deliberate exception: it is
+a host service with no `compose.yml` — see [DeepSeek Harness](#deepseek-harness).
 
 `adblock` is the LAN's DNS: Pi-hole at 192.168.40.5 on the Docker VLAN, with a
 local recursive Unbound on a private bridge behind it. It needs the host VLAN
@@ -141,6 +149,12 @@ stacks, each deployed the same way — pick it in Dockhand:
 | `monitoring` | Glances | `glances.$TLD` |
 | `mail` | Mailpit | `mailpit.$TLD`; SMTP on port 1025 |
 | `ai` | Ollama | `ollama.$TLD` (behind authentik); `127.0.0.1:11434` on the host |
+
+`dsh` is the one exception to that table: the DeepSeek Harness refuses to bind
+anything but loopback, so it runs as a host systemd *user* service with a small
+bridge in front of it, and has no `compose.yml` to deploy from Dockhand.
+`setup.sh` (and `update.sh`) provision it through `dsh/install.sh` — see
+[DeepSeek Harness](#deepseek-harness).
 
 `arr`, `books` and `plex` all reach into the shared `downloads/` tree at the repo
 root, mounted whole at the same path — `/data/downloads` — in every container.
@@ -566,6 +580,10 @@ repo root does not know about, so their panels need these:
 | `mail` | `TLD`, `TZ`, `PUID`, `PGID`, and optionally the `MP_*` relay/webhook settings |
 | `iptv`, `monitoring`, `ai` | `TLD`, `TZ`, `PUID`, `PGID` — inherited from the repo root |
 
+`dsh` is not in this table: it is a host service rather than a Dockhand stack,
+and its settings live in `dsh/.env` — see
+[DeepSeek Harness](#deepseek-harness).
+
 For the two that carry generated secrets — `searxng` (`SEARXNG_SECRET`) and `n8n`
 (the three sandbox values) — `setup.sh` fills them in from the literal
 `change-me` placeholder in the `.env.example`. When deploying from git instead,
@@ -643,9 +661,10 @@ How each service is wired:
 * **authentik** itself is configured by
   `authentik/config/authentik/blueprints/irabelle.yaml`, which the worker
   applies on every start — the user (in `authentik Admins`), an OIDC client
-  for Dockhand, and a proxy provider for Pi-hole. Both applications are bound
-  to `authentik Admins`, so a user added later for something else gets into
-  neither. Edit the blueprint, not the UI, for anything it defines.
+  for Dockhand, and proxy providers for Pi-hole and the DeepSeek Harness. Both
+  applications are bound to `authentik Admins`, so a user added later for
+  something else gets into neither. Edit the blueprint, not the UI, for
+  anything it defines.
 * **Dockhand** speaks OIDC itself. `setup.sh` creates a local Dockhand user
   with the same name and password, registers authentik as its OIDC provider
   (the default button on the login page) and switches authentication on.
@@ -668,8 +687,8 @@ How each service is wired:
 it over OIDC (Dockhand, Kavita, Shelfmark, Cleanuparr), or Traefik's
 `authentik@docker` middleware stands in front of it (everything else with a UI:
 the *arrs, Transmission, Calibre and Calibre-Web, Zigbee2MQTT, ESPHome, VoiceBM,
-Threadfin, Glances, Mailpit, Ollama, SearXNG, n8n, Pi-hole, and Traefik's own
-dashboard). The exceptions, and why:
+Threadfin, Glances, Mailpit, Ollama, SearXNG, n8n, Pi-hole, the DeepSeek Harness
+at `dsh.$TLD`, and Traefik's own dashboard). The exceptions, and why:
 
 | Not behind authentik | Why | Protected by |
 | --- | --- | --- |
@@ -694,6 +713,55 @@ authentik also always has its own built-in `akadmin` account. You do not use
 it, but it is given a generated password (`AUTHENTIK_BOOTSTRAP_PASSWORD`),
 because an `akadmin` without one leaves authentik's first-run setup page open
 to anyone on the LAN.
+
+## DeepSeek Harness
+
+`dsh/` puts the [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)
+at `https://dsh.$TLD` behind the authentik login, with the
+[dsh-mobile](https://github.com/notf0und/dsh-mobile) plugin installed so a phone
+gets a proper shell.
+
+It is the one thing here that is **not a container**. `dsh web` refuses to bind
+anything but `127.0.0.1` — the GUI is remote code execution — so
+`dsh/dsh-web-bridge.mjs` runs as a systemd *user* service on the host, listens
+on the Docker gateway, and forwards to the harness on loopback; Traefik dials
+the bridge through `host.docker.internal`, exactly as the `plex` and `glances`
+stacks reach their host-network containers. The upside is that the agent runs as
+you, on this host, with your real checkouts and tools.
+
+`dsh/install.sh` owns the whole install and is idempotent:
+
+```sh
+./setup.sh                 # runs it among the rest of setup
+./dsh/install.sh           # or on its own, after editing dsh/.env
+./dsh/install.sh --status  # node / profile / plugin / service / route
+```
+
+It creates `dsh/.env` (TLD from the root `.env`), bootstraps the DSH profile,
+clones and installs `dsh-mobile`, renders and starts the systemd user service,
+enables lingering so it survives logging out of SSH, and renders
+`traefik/config/certificates/dsh.yml` — the route in Traefik's file provider.
+The authentik half is the `dsh-provider` forward-auth provider in the blueprint
+above. `update.sh` re-runs it with `--no-restart` on every pass.
+
+Two things worth knowing:
+
+* **It tracks the latest release on every start.** `DSH_REFRESH_ON_START=1`
+  makes the bridge resolve and download `DSH_UPDATE_TAG` before each cold start,
+  so every instance is the newest release — the effect of
+  `npx @deepseek-ai/dsh@latest web`, without the `npx` process that outlives a
+  stop and keeps holding the port. A release that never becomes ready is rolled
+  back automatically.
+* **The harness needs Node.js** (20+, 22+ recommended) on this host. Without it
+  `install.sh` explains what to install and `setup.sh` carries on; nothing else
+  depends on it.
+
+The harness stops itself after `IDLE_MINUTES` (20 by default) with no browser
+connection, no session activity and no running tool, and starts again on the
+next request — so it costs nothing while unused. Logs and control are
+`journalctl --user -u dsh-web` and `systemctl --user status dsh-web`. Full
+detail, including the PWA/phone notes and a troubleshooting table, is in
+[dsh/README.md](dsh/README.md).
 
 ## Smart home
 
@@ -1062,6 +1130,7 @@ committed by accident:
 | `**/config/{homeassistant,homeassistant-db,mosquitto,zigbee2mqtt,esphome,voicebm}/*`, `smarthome/cache/` | Home Assistant's config and history database, MQTT data, Zigbee network, ESPHome devices, VoiceBM's models and recordings; ESPHome's build cache |
 | `**/config/{threadfin,warp}/*`, `**/config/streamlink/streams.yaml` | IPTV playlists and buffer, the WARP registration, your stream list (`streams.yaml.example` is committed) |
 | `**/config/{mailpit,ollama}/*`, `ai/models/` | the mail store, Ollama's keys and its models |
+| `dsh/.dsh-mobile/` | the dsh-mobile checkout `dsh/install.sh` clones to build the plugin into the DSH profile (`dsh/.env` is covered by the `.env` rule) |
 
 The patterns use `**/` so any stack added later is covered without touching
 `.gitignore`. Nothing generated is committed and no `.gitkeep` placeholders are

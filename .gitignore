@@ -126,3 +126,10 @@ smarthome/cache/
 **/config/mailpit/*
 **/config/ollama/*
 ai/models/
+
+# dsh: the harness runs as a host service, not a container (see dsh/README.md),
+# so it keeps no config/ directory. The dsh-mobile checkout that install.sh
+# clones is build input, not tracked state — the plugin itself is vendored into
+# the DSH profile. dsh/.env is covered by the .env rules above and the rendered
+# Traefik route by the config/certificates rule.
+dsh/.dsh-mobile/
