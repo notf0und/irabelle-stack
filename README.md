@@ -573,7 +573,7 @@ repo root does not know about, so their panels need these:
 | --- | --- |
 | `arr` | `TLD`, `TZ`, `PUID`, `PGID`, `SONARR_API_KEY`, `RADARR_API_KEY`, `PROWLARR_API_KEY`, `LINGARR_DB_PASSWORD`, `LINGARR_DB_ROOT_PASSWORD` |
 | `plex` | `TLD`, `TZ`, `PUID`, `PGID` — inherited from the repo root; `PLEX_CLAIM` for the one start that claims it |
-| `books` | `TLD`, `TZ`, `PUID`, `PGID`, `KAVITA_API_KEY`, and the optional `GLUE_*` / `CALIBRE_AUTO_RESTART` toggles |
+| `books` | `TLD`, `TZ`, `PUID`, `PGID`, `KAVITA_API_KEY`, `SHELFMARK_USERNAME`, `SHELFMARK_PASSWORD`, and the optional `GLUE_*` / `CALIBRE_AUTO_RESTART` toggles |
 | `searxng` | `TLD`, `TZ`, `SEARXNG_SECRET` |
 | `n8n` | `TLD`, `TZ`, `PUID`, `PGID`, `SANDBOX_API_KEYS`, `SANDBOX_API_RUNNER_REGISTRATION_TOKEN`, `SANDBOX_API_RUNNER_API_KEY` |
 | `pocket-tts2` | `TLD`, `TZ`, `PUID`, `PGID`, and optionally `HF_TOKEN` |
@@ -836,7 +836,7 @@ Run by hand like that it is also what claims Plex (below).
 | Transmission, Byparr | forward auth | download and in-progress directories |
 | Plex | its own (your Plex account) | the Movies and TV Shows libraries, once claimed |
 | Kavita | authentik over OIDC | your admin account, the Books library (CWA's Calibre library), and the API key books-glue uses |
-| Shelfmark | authentik over OIDC | your admin account, Prowlarr and Transmission for torrents, and the path between Transmission and CWA's ingest folder |
+| Shelfmark | authentik over OIDC | your admin account, Prowlarr (switched on) and Transmission for torrents, the path between Transmission and CWA's ingest folder, Byparr for Cloudflare, the Library button to CWA, and the login books-glue's mirror refresh uses |
 | Calibre-Web-Automated | forward auth, then authentik's username header | its default `admin` renamed to your login and given your password |
 | Calibre | forward auth | — |
 

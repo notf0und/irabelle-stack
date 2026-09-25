@@ -300,6 +300,23 @@ def load_current(config_path: str) -> dict[str, list[str]]:
 
 
 def apply_changes(api_url: str, changes: dict[str, list[str]], timeout: int) -> dict:
+    # Once Shelfmark has a login (authentik, with a local admin to fall back
+    # on) the settings API answers 401 without a session, so log in first as
+    # that admin - OIDC mode still takes a password login from it.
+    # integrations.py puts the credentials in books/.env.
+    opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor())
+    username = os.environ.get("SHELFMARK_USERNAME", "")
+    password = os.environ.get("SHELFMARK_PASSWORD", "")
+    if username and password:
+        parts = urllib.parse.urlsplit(api_url)
+        login = urllib.request.Request(
+            f"{parts.scheme}://{parts.netloc}/api/auth/login",
+            data=json.dumps({"username": username, "password": password}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with opener.open(login, timeout=timeout) as response:
+            response.read()
     body = json.dumps(changes).encode("utf-8")
     request = urllib.request.Request(
         api_url,
@@ -307,7 +324,7 @@ def apply_changes(api_url: str, changes: dict[str, list[str]], timeout: int) -> 
         headers={"Content-Type": "application/json"},
         method="PUT",
     )
-    with urllib.request.urlopen(request, timeout=timeout) as response:
+    with opener.open(request, timeout=timeout) as response:
         payload = response.read().decode("utf-8", "replace")
     try:
         return json.loads(payload)

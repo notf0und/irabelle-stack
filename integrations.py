@@ -22,7 +22,8 @@
 #                 queue cleaner and malware blocker
 #   Kavita        admin account, Books library, authentik OIDC, and the API
 #                 key books-glue uses
-#   Shelfmark     Prowlarr + Transmission for torrents, authentik OIDC
+#   Shelfmark     Prowlarr + Transmission for torrents, Byparr, the CWA
+#                 Library button, authentik OIDC
 #   Calibre-Web   admin renamed to your login, which authentik's header logs
 #                 you into
 #   Home Assistant  owner account, trusts Traefik, history in MariaDB, MQTT
@@ -687,6 +688,14 @@ def shelfmark_wanted():
             "OIDC_SCOPES": ["openid", "email", "profile"], "OIDC_GROUP_CLAIM": "groups",
             "OIDC_ADMIN_GROUP": "authentik Admins", "OIDC_USE_ADMIN_GROUP": True,
             "OIDC_AUTO_PROVISION": True, "OIDC_BUTTON_LABEL": "authentik"},
+        # Byparr (the arr stack's, on app-bridge) for the Cloudflare pages of
+        # the direct-download mirrors.
+        "cloudflare_bypass.json": {
+            "USE_CF_BYPASS": True, "USING_EXTERNAL_BYPASSER": True,
+            "EXT_BYPASSER_URL": "http://byparr:8191", "EXT_BYPASSER_PATH": "/v1"},
+        # The General tab, one folder up: its Library button opens CWA, so the
+        # URL is the one your browser uses.
+        "../settings.json": {"CALIBRE_WEB_URL": f"https://calibre-web-automated.{TLD}"},
     }
 
 
@@ -710,22 +719,45 @@ def shelfmark(shelfmark):
         except HttpError as e:
             if e.status != 409:  # 409: it exists already
                 raise
+    # books-glue's mirror refresh logs in as that admin: the settings API it
+    # pushes to needs a session once the authentik login is on.
+    books = read_env("books")
+    if books.get("SHELFMARK_USERNAME") != USER or books.get("SHELFMARK_PASSWORD") != PASSWORD:
+        set_env("books", "SHELFMARK_USERNAME", USER)
+        set_env("books", "SHELFMARK_PASSWORD", PASSWORD)
+        compose("books", "up", "-d", "books-glue")
+        note("login for the mirror refresh saved to books/.env for books-glue (restarted)")
     # The rest straight into its settings files rather than its API: once the
     # authentik login is on, the API wants a login session this script does
     # not have. A key already set to something else is left as you set it.
-    changes = {}
+    # Shelfmark writes its switches' defaults (PROWLARR_ENABLED: false, ...) to
+    # these files itself, so an off switch is not necessarily yours: each one
+    # we want on is turned on once, and remembered here, so that turning it
+    # off in the UI afterwards sticks.
+    switched_path = os.path.join(SHELFMARK, "..", "integrations-switched.json")
+    try:
+        switched = set(json.load(open(switched_path)))
+    except (OSError, ValueError):
+        switched = set()
+    changes, wanted = {}, {}
     for name, want in shelfmark_wanted().items():
-        path = os.path.join(SHELFMARK, name)
+        path = os.path.normpath(os.path.join(SHELFMARK, name))
+        wanted[path] = want
         try:
             cur = json.load(open(path))
         except (OSError, ValueError):
             cur = {}
         add = {k: v for k, v in want.items()
-               if k not in cur or cur[k] in ("", None, [], "none") or (name == "security.json" and cur.get("AUTH_METHOD") in (None, "none"))}
+               if k not in cur or cur[k] in ("", None, [], "none")
+               or (v is True and cur[k] is False and f"{name}:{k}" not in switched)
+               or (name == "security.json" and cur.get("AUTH_METHOD") in (None, "none"))}
         if add:
             changes[path] = {**cur, **add}
+        switched |= {f"{name}:{k}" for k, v in want.items() if v is True}
+    with open(switched_path, "w") as fh:
+        json.dump(sorted(switched), fh, indent=2)
     if not changes:
-        note("already wired to Prowlarr, Transmission and authentik")
+        note("already wired to Prowlarr, Transmission, Byparr, CWA and authentik")
         return
     docker("stop", "shelfmark", check=True)
     try:
@@ -733,7 +765,7 @@ def shelfmark(shelfmark):
             os.makedirs(os.path.dirname(path), exist_ok=True)
             with open(path, "w") as fh:
                 json.dump(data, fh, indent=2)
-            note(f"{os.path.basename(path)}: " + ", ".join(sorted(k for k in data if k in shelfmark_wanted()[os.path.basename(path)])))
+            note(f"{os.path.basename(path)}: " + ", ".join(sorted(k for k in data if k in wanted[path])))
     finally:
         docker("start", "shelfmark", check=True)
 

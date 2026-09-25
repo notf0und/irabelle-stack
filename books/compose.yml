@@ -262,7 +262,9 @@ services:
       STATE_FILE: /state/seen.json
       # Daily mirror refresh: open-slum.org says which mirrors are up; each new
       # one is probed before it is added, and pushed into Shelfmark through its
-      # own settings API, which applies it live.
+      # own settings API, which applies it live. It logs in as Shelfmark's local
+      # admin: SHELFMARK_USERNAME / SHELFMARK_PASSWORD, which integrations.py
+      # puts in .env.
       MIRROR_REFRESH_ENABLED: ${MIRROR_REFRESH_ENABLED:-true}
       MIRROR_REFRESH_INTERVAL: ${MIRROR_REFRESH_INTERVAL:-86400}
       MIRROR_REFRESH_SOURCES: ${MIRROR_REFRESH_SOURCES:-aa,libgen,zlib,welib}
