@@ -171,12 +171,13 @@ if [ "$DRY_RUN" = 0 ] && [ "$DO_INTEGRATIONS" = 1 ] && [ -f "$REPO_DIR/integrati
 fi
 
 # --- the DeepSeek Harness (a host service, not a stack) ------------------------
-# dsh is not a container (see dsh/install.sh): refresh its files and its
-# dsh-mobile copy on every update. --no-restart on purpose — this runs from
-# cron, where there is no user D-Bus to talk to, and a restart would kill any
-# turn in flight. The bridge cold-starts the harness on the next request, which
-# is when a refreshed plugin takes effect.
-if [ "$DRY_RUN" = 0 ] && [ -x "$REPO_DIR/dsh/install.sh" ]; then
+# Refresh dsh only if it is installed — it is opt-in, and setup.sh asks before
+# creating one (see the DSH_INSTALL note there). --no-restart on purpose: this
+# runs from cron, where there is no user D-Bus to talk to, and a restart would
+# kill any turn in flight. The bridge cold-starts the harness on the next
+# request, which is when a refreshed plugin takes effect.
+if [ "$DRY_RUN" = 0 ] && [ -x "$REPO_DIR/dsh/install.sh" ] \
+   && [ -f "$HOME/.config/systemd/user/dsh-web.service" ]; then
   "$REPO_DIR/dsh/install.sh" --no-restart \
     || echo "dsh/install.sh failed — run it by hand: $REPO_DIR/dsh/install.sh" >&2
 fi

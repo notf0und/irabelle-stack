@@ -29,8 +29,10 @@ the agent run *as you, on this host*, with your real checkouts and tools,
 rather than in a container with a mounted workspace.
 
 So `dsh` is the one directory here **without a `compose.yml`**: it is not a
-Dockhand stack. `setup.sh`, `stacks.sh` and `update.sh` still know about it —
-`setup.sh` and `update.sh` call `dsh/install.sh`, which owns everything below.
+Dockhand stack. Installing it is **opt-in** — `setup.sh` asks once and keeps the
+answer in `host.env` as `DSH_INSTALL` (`--dsh` / `--no-dsh` answer without being
+asked) — and `dsh/install.sh` owns everything below. `update.sh` refreshes an
+install that exists, but never creates one.
 
 ## What `dsh/install.sh` does
 
@@ -54,8 +56,9 @@ entry in `authentik/config/authentik/blueprints/irabelle.yaml`, applied by the
 authentik worker on start. Nothing in `dsh/` needs to touch the UI.
 
 ```sh
-./setup.sh                 # runs install.sh among the rest of setup
-./dsh/install.sh           # or just this, after editing dsh/.env
+./setup.sh                 # asks whether to install it (once; answer in host.env)
+./setup.sh --dsh           # install it without the question
+./dsh/install.sh           # install/refresh directly, after editing dsh/.env
 ./dsh/install.sh --status  # what is installed, changing nothing
 ```
 

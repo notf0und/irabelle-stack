@@ -153,8 +153,9 @@ stacks, each deployed the same way — pick it in Dockhand:
 `dsh` is the one exception to that table: the DeepSeek Harness refuses to bind
 anything but loopback, so it runs as a host systemd *user* service with a small
 bridge in front of it, and has no `compose.yml` to deploy from Dockhand.
-`setup.sh` (and `update.sh`) provision it through `dsh/install.sh` — see
-[DeepSeek Harness](#deepseek-harness).
+Installing it is opt-in — `setup.sh` asks once and remembers the answer in
+`host.env` (`DSH_INSTALL`, `--dsh` / `--no-dsh`) — and it is provisioned
+through `dsh/install.sh`; see [DeepSeek Harness](#deepseek-harness).
 
 `arr`, `books` and `plex` all reach into the shared `downloads/` tree at the repo
 root, mounted whole at the same path — `/data/downloads` — in every container.
@@ -729,11 +730,16 @@ the bridge through `host.docker.internal`, exactly as the `plex` and `glances`
 stacks reach their host-network containers. The upside is that the agent runs as
 you, on this host, with your real checkouts and tools.
 
-`dsh/install.sh` owns the whole install and is idempotent:
+`dsh/install.sh` owns the whole install and is idempotent. Installing it is
+**opt-in**: `setup.sh` asks on its first run and remembers the answer in
+`host.env` as `DSH_INSTALL` (`yes`/`no`), because a host user service and a
+Node.js dependency are a real choice — `--dsh` / `--no-dsh` answer without
+being asked.
 
 ```sh
-./setup.sh                 # runs it among the rest of setup
-./dsh/install.sh           # or on its own, after editing dsh/.env
+./setup.sh                 # asks once, unless host.env already answers
+./setup.sh --dsh           # install it, no question
+./dsh/install.sh           # install/refresh directly, after editing dsh/.env
 ./dsh/install.sh --status  # node / profile / plugin / service / route
 ```
 
@@ -742,7 +748,8 @@ clones and installs `dsh-mobile`, renders and starts the systemd user service,
 enables lingering so it survives logging out of SSH, and renders
 `traefik/config/certificates/dsh.yml` — the route in Traefik's file provider.
 The authentik half is the `dsh-provider` forward-auth provider in the blueprint
-above. `update.sh` re-runs it with `--no-restart` on every pass.
+above. `update.sh` only ever **refreshes an install that already exists**
+(`--no-restart`), so nothing installs dsh behind your back.
 
 Two things worth knowing:
 

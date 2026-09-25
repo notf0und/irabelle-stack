@@ -43,6 +43,11 @@
 #      wired, so on a first run that is nothing yet: update.sh runs it again
 #      after every pull, and ./integrations.py does it (and asks for the Plex
 #      claim code) right after you deploy them from Dockhand
+#   6c. the DeepSeek Harness at dsh.$TLD (dsh/install.sh) — asked for, never
+#      assumed: it is a host systemd user service rather than a container, and
+#      needs Node.js. The answer is kept in host.env as DSH_INSTALL
+#      ("yes"/"no"); an install that already exists is refreshed without
+#      asking. See --dsh / --no-dsh above
 #   7. trust the root CA on this host (see --no-trust-ca above)
 #   8. tell Docker to wait for this checkout's filesystem at boot, if it is a
 #      separate mount (see --no-mount-guard above)
@@ -67,6 +72,7 @@ CRON_MODE=yes
 TRUST_CA=yes
 MOUNT_GUARD=yes
 FAST_DISK_OPT=
+DSH_OPT=
 
 usage() {
   cat <<'EOF'
@@ -91,6 +97,10 @@ Usage: ./setup.sh [options]
                     (needs sudo; asked for on the first run when this checkout
                     is on a slow disk — see fast-disk.sh)
   --no-fast-disk    keep them in the checkout, and stop asking
+  --dsh             install the DeepSeek Harness at dsh.$TLD without asking.
+                    It is a host systemd user service, not a container, and
+                    needs Node.js on this host — see dsh/README.md
+  --no-dsh          do not install it, and stop asking
   -h, --help        this text
 
 Environment:
@@ -115,6 +125,8 @@ while [ $# -gt 0 ]; do
     --no-mount-guard) MOUNT_GUARD=no ;;
     --fast-disk) shift; FAST_DISK_OPT=${1:?--fast-disk needs a directory} ;;
     --no-fast-disk) FAST_DISK_OPT=none ;;
+    --dsh) DSH_OPT=yes ;;
+    --no-dsh) DSH_OPT=no ;;
     -h|--help) usage 0 ;;
     *) echo "Unknown option: $1" >&2; usage 2 ;;
   esac
@@ -1139,7 +1151,51 @@ python3 "$REPO_DIR/integrations.py" \
 # blueprint, applied with the rest of authentik above. It needs Node.js on this
 # host; without it install.sh explains what to install and exits, which must not
 # fail the rest of setup.
-if [ -x "$REPO_DIR/dsh/install.sh" ]; then
+#
+# It is opt-in. A container costs this host nothing to skip; a user service and
+# a Node.js dependency are a real choice, so setup.sh asks once and keeps the
+# answer in host.env (--dsh / --no-dsh set it without asking). An install that
+# already exists is simply refreshed — and update.sh only ever refreshes, never
+# creates, so nothing installs dsh behind your back.
+DSH_UNIT="$HOME/.config/systemd/user/dsh-web.service"
+[ -n "$DSH_OPT" ] && host_env_set DSH_INSTALL "$DSH_OPT"
+DSH_INSTALL=$(host_env_get DSH_INSTALL)
+
+dsh_install=no
+case "$DSH_INSTALL" in
+  yes)
+    dsh_install=yes
+    note "DeepSeek Harness: installing (DSH_INSTALL=yes in host.env)"
+    ;;
+  no)
+    note "DeepSeek Harness: skipped (DSH_INSTALL=no in host.env) — ./setup.sh --dsh adds it"
+    ;;
+  *)
+    if [ -f "$DSH_UNIT" ]; then
+      dsh_install=yes
+      note "DeepSeek Harness: already installed — refreshing"
+    elif [ -t 0 ]; then
+      dsh_answer=
+      while :; do
+        read -r -p "    also install the DeepSeek Harness at dsh.${ROOT_TLD:-smart}? [y/N] " dsh_answer || true
+        case "${dsh_answer:-}" in
+          ""|[nN]|[nN][oO]) dsh_install=no; break ;;
+          [yY]|[yY][eE][sS]) dsh_install=yes; break ;;
+          *) warn "answer y or n" ;;
+        esac
+      done
+      host_env_set DSH_INSTALL "$dsh_install"
+      if [ "$dsh_install" = no ]; then
+        note "DeepSeek Harness: not installed — ./setup.sh --dsh adds it later"
+      fi
+    else
+      note "no terminal to ask on — the DeepSeek Harness is skipped"
+      note "add it with ./setup.sh --dsh (or ./dsh/install.sh)"
+    fi
+    ;;
+esac
+
+if [ -x "$REPO_DIR/dsh/install.sh" ] && [ "$dsh_install" = yes ]; then
   "$REPO_DIR/dsh/install.sh" \
     || warn "dsh is not fully set up — see the message above, then: ./dsh/install.sh"
 fi
