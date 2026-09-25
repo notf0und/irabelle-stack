@@ -105,6 +105,26 @@ PASSWORD = AK.get("ADMIN_PASSWORD", "")
 EMAIL = AK.get("ADMIN_EMAIL", "")  # asked for by setup.sh
 
 
+def host_setting(key, default=""):
+    """A value from the gitignored host.env, the way setup.sh reads it."""
+    try:
+        with open(os.path.join(REPO, "host.env")) as fh:
+            for line in fh:
+                m = re.match(rf"\s*{re.escape(key)}\s*=\s*(.*)$", line)
+                if m:
+                    return m.group(1).split("#", 1)[0].strip().strip("\"'")
+    except OSError:
+        pass
+    return default
+
+
+# setup.sh remembers whether authentik is part of this install. Every account
+# and login this script configures uses the authentik admin credentials, so
+# without it there is nothing to wire — the services are still published at
+# <name>.$TLD, just with whatever login of their own they have.
+AUTHENTIK = os.environ.get("AUTHENTIK_ENABLED", host_setting("AUTHENTIK_INSTALL", "yes")) != "no"
+
+
 # --- docker -----------------------------------------------------------------
 def docker(*args, check=False):
     return subprocess.run(["docker", *args], capture_output=True, text=True, check=check)
@@ -960,8 +980,18 @@ def homeassistant(homeassistant):
 
 
 def main():
-    if not (USER and PASSWORD and TLD):
-        warn("authentik/.env has no ADMIN_USERNAME/ADMIN_PASSWORD, or .env no TLD — nothing wired")
+    if not TLD:
+        warn(".env has no TLD — nothing wired")
+        return 0
+    if not AUTHENTIK:
+        warn("authentik is disabled (AUTHENTIK_INSTALL=no): every account and login")
+        warn("this script configures uses its admin credentials, so there is nothing")
+        warn("to wire. The services are still published at <name>.$TLD — run")
+        warn("./setup.sh --authentik to turn single sign-on back on, or wire the")
+        warn("apps by hand.")
+        return 0
+    if not (USER and PASSWORD):
+        warn("authentik/.env has no ADMIN_USERNAME/ADMIN_PASSWORD — run ./setup.sh")
         return 0
     if not all(ARR.get(k) for k in ("SONARR_API_KEY", "RADARR_API_KEY", "PROWLARR_API_KEY")) and running("sonarr"):
         warn("arr/.env is missing API keys — run ./setup.sh first")

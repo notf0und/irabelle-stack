@@ -62,7 +62,7 @@ services:
       traefik.http.routers.calibre-https.entrypoints: websecure
       traefik.http.routers.calibre-https.service: calibre
       traefik.http.routers.calibre-https.tls: true
-      traefik.http.routers.calibre-https.middlewares: authentik@docker
+      traefik.http.routers.calibre-https.middlewares: ${AUTH_MIDDLEWARE:-authentik@docker}
     restart: unless-stopped
 
   # Watches the ingest folder and imports anything that lands in it into the
@@ -108,7 +108,7 @@ services:
       traefik.http.routers.calibre-web-automated-https.tls: true
       # CWA builds absolute URLs from the scheme it sees; behind Traefik the TLS
       # ends at the proxy, so tell it plainly that the client used https.
-      traefik.http.routers.calibre-web-automated-https.middlewares: authentik@docker,calibre-web-automated-https
+      traefik.http.routers.calibre-web-automated-https.middlewares: ${AUTH_MIDDLEWARE:-authentik@docker},calibre-web-automated-https
       traefik.http.middlewares.calibre-web-automated-https.headers.customrequestheaders.X-Scheme: https
       # OPDS and Kobo sync, for e-readers: no authentik, CWA's own password.
       # CWA logs in whoever the X-authentik-username header names (the header

@@ -36,5 +36,5 @@ services:
       traefik.http.routers.glances-https.entrypoints: websecure
       traefik.http.routers.glances-https.service: glances
       traefik.http.routers.glances-https.tls: true
-      traefik.http.routers.glances-https.middlewares: authentik@docker
+      traefik.http.routers.glances-https.middlewares: ${AUTH_MIDDLEWARE:-authentik@docker}
     restart: unless-stopped

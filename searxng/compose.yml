@@ -74,7 +74,7 @@ services:
       traefik.http.routers.searxng-https.tls: true
       # The search page, behind authentik. Apps that search (n8n) call
       # http://searxng:8080 over app-bridge instead, and skip it.
-      traefik.http.routers.searxng-https.middlewares: authentik@docker
+      traefik.http.routers.searxng-https.middlewares: ${AUTH_MIDDLEWARE:-authentik@docker}
     restart: unless-stopped
 
   searxng-redis:

@@ -63,7 +63,7 @@ services:
       traefik.http.routers.pihole-https.rule: Host("pihole") || Host("pihole.${TLD:?TLD is unset - set it in adblock/.env or in the Dockhand stack environment panel}")
       traefik.http.routers.pihole-https.entrypoints: websecure
       traefik.http.routers.pihole-https.tls: true
-      traefik.http.routers.pihole-https.middlewares: authentik@docker,pihole-admin
+      traefik.http.routers.pihole-https.middlewares: ${AUTH_MIDDLEWARE:-authentik@docker},pihole-admin
       traefik.http.middlewares.pihole-admin.redirectregex.regex: ^https?://([^/]+)/?$$
       traefik.http.middlewares.pihole-admin.redirectregex.replacement: https://$${1}/admin/
 

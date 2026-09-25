@@ -42,7 +42,7 @@ services:
       traefik.http.routers.ollama-https.entrypoints: websecure
       traefik.http.routers.ollama-https.service: ollama
       traefik.http.routers.ollama-https.tls: true
-      traefik.http.routers.ollama-https.middlewares: authentik@docker
+      traefik.http.routers.ollama-https.middlewares: ${AUTH_MIDDLEWARE:-authentik@docker}
     restart: unless-stopped
 
 networks:

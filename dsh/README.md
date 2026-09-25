@@ -2,8 +2,9 @@
 
 Open `https://dsh.smart` from your LAN or your phone and the harness is just
 there: no SSH, no port-forwarding, no `npx` in a terminal. Behind the authentik
-login you already use for everything else, and with the [dsh-mobile][] plugin
-installed so a phone gets a proper shell.
+login you already use for everything else (or with no login at all, if single
+sign-on was opted out of — see the root README), and with the [dsh-mobile][]
+plugin installed so a phone gets a proper shell.
 
 ```
 phone / laptop
@@ -114,6 +115,7 @@ key); re-run `./dsh/install.sh` after a change.
 | `UPDATE_HOURS` | `1` | background check while running (`0` disables) |
 | `DSH_CWD` | `$HOME` | default working directory (unset = a fresh machine's default) |
 | `DSH_MOBILE_REPO` / `_REF` | the dsh-mobile repo / `main` | where the plugin is cloned from |
+| `AUTH_MIDDLEWARE` | `authentik@docker` | the route's middleware; `setup.sh` writes `no-auth@docker` here when single sign-on is opted out of |
 
 ### Always the newest release
 

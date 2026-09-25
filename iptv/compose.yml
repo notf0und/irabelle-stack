@@ -42,7 +42,7 @@ services:
       traefik.http.routers.threadfin-https.entrypoints: websecure
       traefik.http.routers.threadfin-https.service: threadfin
       traefik.http.routers.threadfin-https.tls: true
-      traefik.http.routers.threadfin-https.middlewares: authentik@docker
+      traefik.http.routers.threadfin-https.middlewares: ${AUTH_MIDDLEWARE:-authentik@docker}
     restart: unless-stopped
 
   streamlink:

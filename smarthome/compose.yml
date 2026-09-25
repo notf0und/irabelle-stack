@@ -158,7 +158,7 @@ services:
       traefik.http.routers.zigbee2mqtt-https.entrypoints: websecure
       traefik.http.routers.zigbee2mqtt-https.service: zigbee2mqtt
       traefik.http.routers.zigbee2mqtt-https.tls: true
-      traefik.http.routers.zigbee2mqtt-https.middlewares: authentik@docker
+      traefik.http.routers.zigbee2mqtt-https.middlewares: ${AUTH_MIDDLEWARE:-authentik@docker}
     restart: unless-stopped
 
   esphome:
@@ -193,7 +193,7 @@ services:
       traefik.http.routers.esphome-https.entrypoints: websecure
       traefik.http.routers.esphome-https.service: esphome
       traefik.http.routers.esphome-https.tls: true
-      traefik.http.routers.esphome-https.middlewares: authentik@docker
+      traefik.http.routers.esphome-https.middlewares: ${AUTH_MIDDLEWARE:-authentik@docker}
     restart: unless-stopped
 
   voicebm:
@@ -244,7 +244,7 @@ services:
       traefik.http.routers.voicebm-https.entrypoints: websecure
       traefik.http.routers.voicebm-https.service: voicebm
       traefik.http.routers.voicebm-https.tls: true
-      traefik.http.routers.voicebm-https.middlewares: authentik@docker
+      traefik.http.routers.voicebm-https.middlewares: ${AUTH_MIDDLEWARE:-authentik@docker}
     restart: unless-stopped
 
 networks:

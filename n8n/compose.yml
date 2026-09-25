@@ -158,7 +158,7 @@ services:
       traefik.http.routers.n8n-https.service: n8n
       traefik.http.routers.n8n-https.tls: true
       # The editor, behind authentik (and n8n's own login after it).
-      traefik.http.routers.n8n-https.middlewares: authentik@docker
+      traefik.http.routers.n8n-https.middlewares: ${AUTH_MIDDLEWARE:-authentik@docker}
       # What other systems call — webhooks, forms and MCP triggers — skips
       # authentik: callers cannot log in, and each of those carries its own
       # secret path or credentials.

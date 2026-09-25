@@ -133,3 +133,7 @@ ai/models/
 # the DSH profile. dsh/.env is covered by the .env rules above and the rendered
 # Traefik route by the config/certificates rule.
 dsh/.dsh-mobile/
+
+# Python bytecode from running integrations.py by hand.
+__pycache__/
+*.pyc

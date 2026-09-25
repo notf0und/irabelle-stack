@@ -25,10 +25,12 @@
 #   3. the root CA behind the *.$TLD certificates
 #   3b. if this checkout is on a slow (spinning or USB) disk: every stack's
 #      config/ onto an SSD you pick, bind-mounted back in place (fast-disk.sh)
-#   4. the base stacks — traefik, adblock (once host-vlan.sh has run),
-#      authentik and Dockhand — so https://<service>.$TLD, the login and
-#      Dockhand already work once this script finishes. Everything else (arr,
-#      books, plex, ...) is only adopted into Dockhand, and deployed from there
+#   4. the base stacks that are not already running — traefik, adblock (once
+#      host-vlan.sh has run), authentik (unless single sign-on is opted out of)
+#      and Dockhand — so https://<service>.$TLD and the login already work once
+#      this script finishes. A stack that is already up is left exactly as it
+#      is: this is a bootstrap, not a redeployer. Everything else (arr, books,
+#      plex, ...) is only adopted into Dockhand, and deployed from there
 #   5. each stack's own <stack>/setup.sh hook, sourced in turn: Dockhand's
 #      start + baseline + single sign-on, the media apps wired together
 #      (integrations.py), and the opt-in DeepSeek Harness at dsh.$TLD. The
@@ -60,6 +62,7 @@ TRUST_CA=yes
 MOUNT_GUARD=yes
 FAST_DISK_OPT=
 DSH_OPT=
+AUTHENTIK_OPT=
 
 usage() {
   cat <<'EOF'
@@ -88,6 +91,12 @@ Usage: ./setup.sh [options]
                     It is a host systemd user service, not a container, and
                     needs Node.js on this host — see dsh/README.md
   --no-dsh          do not install it, and stop asking
+  --authentik       set up authentik single sign-on without asking (the
+                    default; asked for on the first run and remembered in
+                    host.env as AUTHENTIK_INSTALL)
+  --no-authentik    do not set it up. Every web UI is then published without
+                    the forward-auth middleware, reachable at <name>.$TLD
+                    with only the app's own login — or none at all
   -h, --help        this text
 
 Environment:
@@ -114,6 +123,8 @@ while [ $# -gt 0 ]; do
     --no-fast-disk) FAST_DISK_OPT=none ;;
     --dsh) DSH_OPT=yes ;;
     --no-dsh) DSH_OPT=no ;;
+    --authentik) AUTHENTIK_OPT=yes ;;
+    --no-authentik) AUTHENTIK_OPT=no ;;
     -h|--help) usage 0 ;;
     *) echo "Unknown option: $1" >&2; usage 2 ;;
   esac
@@ -179,6 +190,52 @@ open_first_url() {
   return 0
 }
 
+# --- authentik: optional -----------------------------------------------------
+# Authentik is the forward-auth middleware in front of every web UI. It is the
+# default, but a host that would rather not run it can say no: the routers then
+# name a no-op middleware instead (traefik/compose.yml defines `no-auth`), so
+# every service is still published at <name>.$TLD and reachable — with only the
+# app's own login, or none. The answer is remembered in host.env, and the
+# middleware is written into each stack's .env below.
+[ -n "$AUTHENTIK_OPT" ] && host_env_set AUTHENTIK_INSTALL "$AUTHENTIK_OPT"
+AUTHENTIK_INSTALL=$(host_env_get AUTHENTIK_INSTALL)
+AUTHENTIK_ENABLED=yes
+case "$AUTHENTIK_INSTALL" in
+  yes) note "authentik: single sign-on on (AUTHENTIK_INSTALL=yes in host.env)" ;;
+  no)
+    AUTHENTIK_ENABLED=no
+    note "authentik: skipped (AUTHENTIK_INSTALL=no in host.env) — every UI is published without a login"
+    ;;
+  *)
+    if [ -t 0 ]; then
+      auth_answer=
+      while :; do
+        read -r -p "    set up authentik single sign-on for every UI? [Y/n] " auth_answer || true
+        case "${auth_answer:-}" in
+          ""|[yY]|[yY][eE][sS]) AUTHENTIK_ENABLED=yes; break ;;
+          [nN]|[nN][oO]) AUTHENTIK_ENABLED=no; break ;;
+          *) warn "answer y or n" ;;
+        esac
+      done
+      host_env_set AUTHENTIK_INSTALL "$AUTHENTIK_ENABLED"
+      if [ "$AUTHENTIK_ENABLED" = no ]; then
+        note "authentik: skipped — ./setup.sh --authentik adds it later"
+      fi
+    else
+      note "no terminal to ask on — authentik single sign-on is set up (pass --no-authentik to skip it)"
+    fi
+    ;;
+esac
+# Every router's middleware. `no-auth` is an allow-everything ipAllowList, i.e.
+# a valid middleware that does nothing — so the routers stay well-formed
+# whether authentik is there or not.
+if [ "$AUTHENTIK_ENABLED" = yes ]; then
+  AUTH_MIDDLEWARE=authentik@docker
+else
+  AUTH_MIDDLEWARE=no-auth@docker
+fi
+export AUTHENTIK_ENABLED AUTH_MIDDLEWARE
+
 command -v docker >/dev/null 2>&1 || die "docker is not installed or not on PATH"
 command -v curl >/dev/null 2>&1 || die "curl is required"
 command -v python3 >/dev/null 2>&1 || die "python3 is required"
@@ -237,6 +294,10 @@ fi
 
 ROOT_TLD=$(env_tld .env)
 for s in "${STACKS[@]}"; do
+  if [ "$AUTHENTIK_ENABLED" = no ] && [ "$s" = authentik ]; then
+    note "$s/.env: left alone (authentik is disabled)"
+    continue
+  fi
   if [ ! -f "$s/.env" ]; then
     if [ -f "$s/.env.example" ]; then
       write_env_from "$s/.env.example" "$s/.env"
@@ -272,12 +333,34 @@ for s in "${STACKS[@]}"; do
 done
 note "stacks found: ${STACKS[*]}"
 
+# Every stack's Traefik routers name this middleware. Write it into the stack's
+# .env for compose to interpolate; the compose label itself falls back to
+# authentik@docker, which is what a git-based deploy or a Dockhand env panel
+# gets when the key is absent. --no-authentik writes no-auth@docker instead.
+set_auth_middleware() {
+  local file=$1
+  [ -f "$file" ] || return 0
+  if grep -q '^[[:space:]]*AUTH_MIDDLEWARE[[:space:]]*=' "$file"; then
+    sed -i "s|^[[:space:]]*AUTH_MIDDLEWARE[[:space:]]*=.*|AUTH_MIDDLEWARE=$AUTH_MIDDLEWARE|" "$file"
+  else
+    printf '\n# Written by ./setup.sh — the middleware every web router names.\nAUTH_MIDDLEWARE=%s\n' "$AUTH_MIDDLEWARE" >>"$file"
+  fi
+}
+set_auth_middleware .env
+for s in "${STACKS[@]}"; do
+  if [ "$AUTHENTIK_ENABLED" = no ] && [ "$s" = authentik ]; then
+    continue
+  fi
+  set_auth_middleware "$s/.env"
+done
+
 # The one login for authentik, Dockhand and Pi-hole. Its password is a
 # `change-me` placeholder like any other, so it was generated just above; the
 # name is the one thing asked for, and only while authentik/.env has none —
 # the blueprint creates this user the first time authentik starts, so a name
 # picked later would be a second user, not a rename.
 AK_ENV=authentik/.env
+if [ "$AUTHENTIK_ENABLED" = yes ]; then
 if [ -f "$AK_ENV" ] && [ -z "$(env_var "$AK_ENV" ADMIN_USERNAME)" ]; then
   ak_user=${ADMIN_USERNAME:-}
   if [ -z "$ak_user" ] && [ -t 0 ]; then
@@ -321,6 +404,9 @@ if [ -f "$AK_ENV" ] && [ -z "$(env_var "$AK_ENV" ADMIN_EMAIL)" ]; then
     printf 'ADMIN_EMAIL=%s\n' "$ak_email" >>"$AK_ENV"
   fi
   note "authentik email: $ak_email"
+fi
+else
+  note "authentik: disabled — no admin login to ask for"
 fi
 
 # adblock's dnsmasq wildcard is a real config file, not a .env — Compose can't
@@ -685,9 +771,14 @@ fi
 # Dockhand is a base stack too, but not in this loop: it has its own
 # dedicated start, health check and baseline configuration in step 5 below.
 BASE_STACKS=(traefik adblock authentik)
-say "Starting the base stacks: ${BASE_STACKS[*]} (and dockhand, below)"
+[ "$AUTHENTIK_ENABLED" = no ] && BASE_STACKS=(traefik adblock)
+say "Starting the base stacks that are not already up: ${BASE_STACKS[*]} (and dockhand, below)"
 for s in "${BASE_STACKS[@]}"; do
   [ -f "$s/compose.yml" ] || continue
+  if stack_is_running "$s"; then
+    note "$s is already running — left alone"
+    continue
+  fi
   if grep -q 'driver:[[:space:]]*macvlan' "$s/compose.yml" 2>/dev/null \
      && ! docker network inspect app-macvlan >/dev/null 2>&1; then
     note "$s: skipped — needs the host VLAN (see warning above)"
@@ -701,6 +792,10 @@ for s in "${BASE_STACKS[@]}"; do
 done
 for s in "${STACKS[@]}"; do
   case " dockhand ${BASE_STACKS[*]} " in *" $s "*) continue ;; esac
+  if [ "$AUTHENTIK_ENABLED" = no ] && [ "$s" = authentik ]; then
+    note "$s: not started (authentik is disabled — ./setup.sh --authentik starts it)"
+    continue
+  fi
   note "$s: not started — deploy it from Dockhand (it is adopted there below)"
 done
 
@@ -978,13 +1073,19 @@ fi
 # this line is out of date (and so is the local Dockhand copy of it).
 # AK_USER/AK_PASS come from the authentik/.env that setup.sh wrote above, or
 # from the dockhand hook when that stack is present — hence the ":-".
-if [ -n "${AK_USER:-}" ] && [ -n "${AK_PASS:-}" ] && [ -n "$ROOT_TLD" ]; then
+if [ "$AUTHENTIK_ENABLED" = yes ] && [ -n "${AK_USER:-}" ] && [ -n "${AK_PASS:-}" ] && [ -n "$ROOT_TLD" ]; then
   say "Your login — authentik, Dockhand and Pi-hole"
   note "username: $AK_USER"
   note "password: $AK_PASS"
   note "(as generated — it is in $AK_ENV; change it in authentik, top right -> Settings)"
   print_url "https://authentik.$ROOT_TLD"
   print_url "https://pihole.$ROOT_TLD/admin/"
+elif [ "$AUTHENTIK_ENABLED" = no ]; then
+  say "authentik is off"
+  warn "every web UI is published without the forward-auth middleware: anyone who"
+  warn "can reach this host can open them. Your LAN (and the app's own login,"
+  warn "where it still has one) is the only boundary."
+  warn "add it whenever you like: ./setup.sh --authentik"
 fi
 
 # This is the last thing printed on purpose — the actual "click this" moment,

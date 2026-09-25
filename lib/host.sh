@@ -45,3 +45,12 @@ host_env_set() {
     printf '%s=%s\n' "$1" "$2" >>host.env
   fi
 }
+
+# True when a stack already has a running container. setup.sh and the hooks use
+# this to leave a stack that is already up exactly as it is — no `up -d` (which
+# can recreate a container when the compose file changed) and no pull. Applying
+# a change is a deliberate act: Dockhand, or
+# `docker compose -f <stack>/compose.yml up -d` by hand.
+stack_is_running() {
+  [ -n "$(docker compose -f "$1/compose.yml" ps --status running -q 2>/dev/null)" ]
+}

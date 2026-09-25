@@ -37,7 +37,7 @@ services:
       traefik.http.routers.mailpit-https.entrypoints: websecure
       traefik.http.routers.mailpit-https.service: mailpit
       traefik.http.routers.mailpit-https.tls: true
-      traefik.http.routers.mailpit-https.middlewares: authentik@docker
+      traefik.http.routers.mailpit-https.middlewares: ${AUTH_MIDDLEWARE:-authentik@docker}
     restart: unless-stopped
 
 networks:

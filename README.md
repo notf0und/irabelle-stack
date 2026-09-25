@@ -363,12 +363,14 @@ work Dockhand cannot do for itself:
    checkout is on a slow (spinning or USB) disk, offer to keep every stack's
    `config/` — its settings and databases — on an SSD instead (see
    [Configs and databases on a fast disk](#configs-and-databases-on-a-fast-disk));
-4. start the **base stacks** — traefik, adblock, authentik and Dockhand —
-   so `https://<service>.<TLD>`, the login and Dockhand work right after
-   this script finishes. adblock needs `app-macvlan`, so it only starts once
-   `host-vlan.sh` has created it. Every other stack (arr, books, plex, …) is
-   not started: it is adopted into Dockhand (step 6) and you deploy it from
-   there;
+4. start the **base stacks that are not already up** — traefik, adblock,
+   authentik (unless single sign-on was opted out of) and Dockhand — so
+   `https://<service>.<TLD>`, the login and Dockhand work right after this
+   script finishes. adblock needs `app-macvlan`, so it only starts once
+   `host-vlan.sh` has created it. **A stack whose containers are already
+   running is left exactly as it is** — no `up -d`, no force-recreate: this is
+   a bootstrap, not a redeployer. Every other stack (arr, books, plex, …) is
+   not started: it is adopted into Dockhand and you deploy it from there;
 5. start **Dockhand** (the last base stack, on its own because it needs a
    health check and a baseline first);
 6. give Dockhand the things that are not in git — a local environment named
@@ -379,14 +381,16 @@ work Dockhand cannot do for itself:
    applied once, only when Dockhand's own database is empty (a fresh
    install); it never overwrites a setting you change afterward in
    Dockhand's UI, the same way an existing `.env` is left alone;
-7. set up **single sign-on** — it asks once for a username and your email
-   (your login for authentik, Dockhand, Pi-hole and the media apps) and
-   generates the password, then makes that the Dockhand login too and
-   switches Dockhand's authentication on. See
+7. ask whether to set up **single sign-on** (optional; `--authentik` /
+   `--no-authentik`, remembered in `host.env`) — with it, it asks once for a
+   username and your email (your login for authentik, Dockhand, Pi-hole and
+   the media apps) and generates the password, then makes that the Dockhand
+   login too and switches Dockhand's authentication on. Without it every UI is
+   published with no login. See
    [Single sign-on](#single-sign-on-authentik). Then it wires together any
    media apps that are already running (`integrations.py`, see
    [Media apps](#media-apps-wired-together-and-behind-authentik)) — on a
-   first run none are yet;
+   first run none are yet, and with authentik off it has nothing to wire;
 8. trust the root CA on this host itself (`sudo`; skip with `--no-trust-ca`)
    — every *client* device (phone, laptop, ...) still needs its own one-time
    step regardless, printed at the end alongside the CA's path;
@@ -661,6 +665,28 @@ others. `setup.sh` prints it at the end; it is also in `authentik/.env`
 user is created once, the first time authentik starts, and the file is not
 read for it again.
 
+**It is optional.** `setup.sh` asks on its first run (default yes) and
+remembers the answer in `host.env` as `AUTHENTIK_INSTALL`; `--authentik` /
+`--no-authentik` answer without being asked. With `no`:
+
+* the authentik stack is not started, `authentik/.env` is not created, and no
+  admin login is asked for;
+* every router names `no-auth@docker` instead of `authentik@docker` — an
+  allow-everything `ipAllowList` defined in `traefik/compose.yml` — so each
+  service is still published and reachable at `<name>.<TLD>`, with the app's
+  own login where it still has one, and none where the stack had switched it
+  off for forward auth. **This is the trade: the services are open to anyone
+  who can reach the host; your LAN is the boundary.** `setup.sh` says so at the
+  end;
+* `integrations.py` prints a note and stops, because every account and login it
+  configures uses the authentik admin credentials. The media apps still run;
+  they just are not wired to each other automatically. `./setup.sh --authentik`
+  turns it on later, and the next `./integrations.py` does the wiring.
+
+The switch is a `KEY=value` in each stack's `.env` — `AUTH_MIDDLEWARE`, written
+by `setup.sh` and defaulting to `authentik@docker` in the compose labels, so a
+git-based deploy that has no `.env` behaves exactly as before.
+
 How each service is wired:
 
 * **authentik** itself is configured by
@@ -688,7 +714,9 @@ How each service is wired:
   address is unaffected. If authentik is down, `pihole.<TLD>` answers 404
   rather than letting anyone in.
 
-**The rule: every web UI is behind authentik.** Either the app logs in through
+**The rule: every web UI is behind authentik** — unless single sign-on is
+opted out of, in which case every router carries `no-auth@docker` instead and
+each service is reachable directly. Either the app logs in through
 it over OIDC (Dockhand, Kavita, Shelfmark, Cleanuparr), or Traefik's
 `authentik@docker` middleware stands in front of it (everything else with a UI:
 the *arrs, Transmission, Calibre and Calibre-Web, Zigbee2MQTT, ESPHome, VoiceBM,

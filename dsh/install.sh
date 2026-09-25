@@ -108,6 +108,9 @@ load_settings() {
   DSH_HOME=$(setting DSH_HOME "${DSH_HOME:-$HOME/.dsh}")
   DSH_MOBILE_REPO=$(setting DSH_MOBILE_REPO "")
   DSH_MOBILE_REF=$(setting DSH_MOBILE_REF "main")
+  # authentik unless setup.sh said otherwise; the environment wins so the hook
+  # passes it through, and the default keeps a standalone run working.
+  AUTH_MIDDLEWARE=$(setting AUTH_MIDDLEWARE "${AUTH_MIDDLEWARE:-authentik@docker}")
   DSH_MOBILE_DIR="$DSH_DIR/.dsh-mobile"
   [ -d "$DSH_CWD" ] || DSH_CWD="$HOME"
   NODE=$(command -v node || true)
@@ -351,6 +354,7 @@ render() {
     line=${line//@DSH_UPDATE_TAG@/$DSH_UPDATE_TAG}
     line=${line//@DSH_REFRESH_ON_START@/$DSH_REFRESH_ON_START}
     line=${line//@UPDATE_HOURS@/$UPDATE_HOURS}
+    line=${line//@AUTH_MIDDLEWARE@/$AUTH_MIDDLEWARE}
     printf '%s\n' "$line"
   done <"$src" >"$dst"
 }

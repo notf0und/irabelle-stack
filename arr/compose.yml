@@ -61,7 +61,7 @@ services:
       traefik.http.routers.bazarr-https.entrypoints: websecure
       traefik.http.routers.bazarr-https.service: bazarr
       traefik.http.routers.bazarr-https.tls: true
-      traefik.http.routers.bazarr-https.middlewares: authentik@docker
+      traefik.http.routers.bazarr-https.middlewares: ${AUTH_MIDDLEWARE:-authentik@docker}
       traefik.http.routers.bazarr-api.rule: Host("bazarr.${TLD:?TLD is not set in .env (see .env.example)}") && PathPrefix("/api")
       traefik.http.routers.bazarr-api.entrypoints: websecure
       traefik.http.routers.bazarr-api.service: bazarr
@@ -95,7 +95,7 @@ services:
       traefik.http.routers.byparr-https.entrypoints: websecure
       traefik.http.routers.byparr-https.service: byparr
       traefik.http.routers.byparr-https.tls: true
-      traefik.http.routers.byparr-https.middlewares: authentik@docker
+      traefik.http.routers.byparr-https.middlewares: ${AUTH_MIDDLEWARE:-authentik@docker}
     restart: unless-stopped
 
   # Removes stalled, slow and malware downloads from the queues, blocklists
@@ -182,7 +182,7 @@ services:
       traefik.http.routers.lingarr-https.entrypoints: websecure
       traefik.http.routers.lingarr-https.service: lingarr
       traefik.http.routers.lingarr-https.tls: true
-      traefik.http.routers.lingarr-https.middlewares: authentik@docker
+      traefik.http.routers.lingarr-https.middlewares: ${AUTH_MIDDLEWARE:-authentik@docker}
     depends_on:
       lingarr-db:
         condition: service_healthy
@@ -249,7 +249,7 @@ services:
       traefik.http.routers.prowlarr-https.entrypoints: websecure
       traefik.http.routers.prowlarr-https.service: prowlarr
       traefik.http.routers.prowlarr-https.tls: true
-      traefik.http.routers.prowlarr-https.middlewares: authentik@docker
+      traefik.http.routers.prowlarr-https.middlewares: ${AUTH_MIDDLEWARE:-authentik@docker}
       traefik.http.routers.prowlarr-api.rule: Host("prowlarr.${TLD:?TLD is not set in .env (see .env.example)}") && PathPrefix("/api")
       traefik.http.routers.prowlarr-api.entrypoints: websecure
       traefik.http.routers.prowlarr-api.service: prowlarr
@@ -290,7 +290,7 @@ services:
       traefik.http.routers.radarr-https.entrypoints: websecure
       traefik.http.routers.radarr-https.service: radarr
       traefik.http.routers.radarr-https.tls: true
-      traefik.http.routers.radarr-https.middlewares: authentik@docker
+      traefik.http.routers.radarr-https.middlewares: ${AUTH_MIDDLEWARE:-authentik@docker}
       traefik.http.routers.radarr-api.rule: Host("radarr.${TLD:?TLD is not set in .env (see .env.example)}") && PathPrefix("/api")
       traefik.http.routers.radarr-api.entrypoints: websecure
       traefik.http.routers.radarr-api.service: radarr
@@ -331,7 +331,7 @@ services:
       traefik.http.routers.sonarr-https.entrypoints: websecure
       traefik.http.routers.sonarr-https.service: sonarr
       traefik.http.routers.sonarr-https.tls: true
-      traefik.http.routers.sonarr-https.middlewares: authentik@docker
+      traefik.http.routers.sonarr-https.middlewares: ${AUTH_MIDDLEWARE:-authentik@docker}
       traefik.http.routers.sonarr-api.rule: Host("sonarr.${TLD:?TLD is not set in .env (see .env.example)}") && PathPrefix("/api")
       traefik.http.routers.sonarr-api.entrypoints: websecure
       traefik.http.routers.sonarr-api.service: sonarr
@@ -375,7 +375,7 @@ services:
       traefik.http.routers.transmission-https.entrypoints: websecure
       traefik.http.routers.transmission-https.service: transmission
       traefik.http.routers.transmission-https.tls: true
-      traefik.http.routers.transmission-https.middlewares: authentik@docker
+      traefik.http.routers.transmission-https.middlewares: ${AUTH_MIDDLEWARE:-authentik@docker}
     restart: unless-stopped
 
 networks:

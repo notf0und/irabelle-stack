@@ -66,8 +66,10 @@ services:
       traefik.http.routers.myapp-https.entrypoints: websecure
       traefik.http.routers.myapp-https.service: myapp
       traefik.http.routers.myapp-https.tls: true
-      # Step 5 decides whether this line stays:
-      traefik.http.routers.myapp-https.middlewares: authentik@docker
+      # Step 5 decides whether this line stays. The value comes from each
+      # stack's .env (setup.sh writes it): authentik@docker, or no-auth@docker
+      # when single sign-on is opted out of.
+      traefik.http.routers.myapp-https.middlewares: ${AUTH_MIDDLEWARE:-authentik@docker}
     restart: unless-stopped
 
 networks:
@@ -142,10 +144,12 @@ committed.
 
 ## 5. The login
 
-Every web UI is behind authentik. Pick the first that fits:
+Every web UI is behind authentik by default — unless single sign-on is opted
+out of, in which case `AUTH_MIDDLEWARE` is `no-auth@docker` and the app is
+published with no login. Pick the first that fits:
 
 **a. The app speaks OIDC** (Kavita, Shelfmark, Cleanuparr, Dockhand): drop the
-`authentik@docker` middleware line, and
+middleware line, and
 
 1. add a client to `authentik/config/authentik/blueprints/irabelle.yaml` —
    copy the Shelfmark block: an `oauth2provider` (`client_id: myapp`, its
@@ -168,7 +172,8 @@ The login links to the account `integrations.py` makes for you by **email**,
 so create that account with `ADMIN_EMAIL`.
 
 **b. The app has no login, or can switch it off** (Sonarr, Bazarr, Lingarr):
-keep `authentik@docker`, turn the app's own login off (or to "External"), and
+keep the middleware line (it resolves through `AUTH_MIDDLEWARE`), turn the
+app's own login off (or to "External"), and
 in the blueprint
 
 1. add a `proxyprovider` in `forward_single` mode for

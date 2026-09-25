@@ -1,4 +1,5 @@
-# dsh — the DeepSeek Harness, published at dsh.<TLD> behind authentik.
+# dsh — the DeepSeek Harness, published at dsh.<TLD> behind the middleware
+# AUTH_MIDDLEWARE names (authentik, unless single sign-on was opted out of).
 #
 # This is a TEMPLATE. ./dsh/install.sh renders it (replacing the host and port
 # tokens below) into
@@ -24,7 +25,9 @@ http:
     dsh-https:
       rule: Host(`dsh.@TLD@`)
       entryPoints: [websecure]
-      middlewares: [authentik@docker]
+      # authentik unless single sign-on is opted out of; install.sh fills this
+      # in from AUTH_MIDDLEWARE (no-auth@docker when authentik is disabled).
+      middlewares: ["@AUTH_MIDDLEWARE@"]
       service: dsh
       tls: {}
 

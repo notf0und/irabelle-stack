@@ -20,12 +20,18 @@ DOCKHAND_PORT=${DOCKHAND_PORT:-3000}
 AK_ENV=${AK_ENV:-authentik/.env}
 ROOT_TLD=${ROOT_TLD:-$(env_tld "$REPO_DIR/.env")}
 ROOT_TLD=${ROOT_TLD:-smart}
+# setup.sh exports this; standalone, read the remembered answer from host.env.
+AUTHENTIK_ENABLED=${AUTHENTIK_ENABLED:-$(host_env_get AUTHENTIK_INSTALL)}
+AUTHENTIK_ENABLED=${AUTHENTIK_ENABLED:-yes}
 
 say "Dockhand"
-# --force-recreate because a re-cloned checkout is a *new* directory: a running
-# container keeps the old mount, which now points at a deleted inode, so it
-# would never see the fresh files.
-( cd dockhand && docker compose up -d --force-recreate )
+if stack_is_running dockhand; then
+  # Already up: leave it exactly as it is. setup.sh is a bootstrap, not a
+  # redeployer — a changed compose.yml is applied from Dockhand, or by hand.
+  note "dockhand is already running — left alone"
+else
+  ( cd dockhand && docker compose up -d )
+fi
 
 printf '    waiting for the API'
 any=0
@@ -223,7 +229,7 @@ PY
   # is missing, so a re-run changes nothing, and a provider or setting you
   # edit in Dockhand's own UI afterward is left alone — the same deal as the
   # baseline above.
-  if [ -f "$AK_ENV" ] && [ -n "$ROOT_TLD" ]; then
+  if [ "$AUTHENTIK_ENABLED" = yes ] && [ -f "$AK_ENV" ] && [ -n "$ROOT_TLD" ]; then
     say "Single sign-on (authentik)"
     AK_SECRET=$(env_var "$AK_ENV" DOCKHAND_OIDC_CLIENT_SECRET)
     SSO_OK=yes
@@ -368,5 +374,9 @@ fetch(process.argv[1])
         note "The local login ($AK_USER) works in the meantime."
       fi
     fi
+  else
+    # authentik is opt-out: Dockhand keeps whatever authentication it has
+    # (usually none), and is reachable at dockhand.$TLD like every other UI.
+    note "single sign-on: skipped (authentik is disabled) — Dockhand keeps its own settings"
   fi
 fi
