@@ -758,12 +758,30 @@ function rejectReason(req) {
   return null;
 }
 
-/** Upstream headers, with the authority dsh and its plugins expect. */
+// The authority dsh is reached on by the bridge. Every upstream request is
+// dressed as one that came from a browser talking to dsh directly on loopback.
+const UPSTREAM_AUTHORITY = `${UPSTREAM_HOST}:${UPSTREAM_PORT}`;
+const UPSTREAM_ORIGIN = `http://${UPSTREAM_AUTHORITY}`;
+// A forwarding trace is itself a refusal: plugins that control the process
+// (dshmarket's restart) or export data reject any request carrying one, on the
+// grounds that a loopback peer that was proxied is not the user.
+const FORWARDING_HEADERS = ['forwarded', 'x-forwarded-for', 'x-forwarded-host', 'x-forwarded-proto', 'x-forwarded-port', 'x-real-ip'];
+
+/**
+ * Upstream headers, with the authority and origin dsh and its plugins expect.
+ *
+ * `Origin` is *set* to the loopback authority rather than deleted, because
+ * dshmarket's process-control and download guards require an Origin that
+ * matches the loopback Host — deleting it passes `sameOrigin` but fails them.
+ * dsh's own fence compares Origin to Host too, and matches either way. This
+ * loosens nothing: the trust decision was already made by rejectReason above,
+ * and this is the request the bridge constructs after passing it.
+ */
 function upstreamHeaders(req) {
   const headers = { ...req.headers };
-  headers.host = `${UPSTREAM_HOST}:${UPSTREAM_PORT}`;
-  headers['x-forwarded-host'] = req.headers.host ?? PUBLIC_HOST;
-  delete headers.origin;
+  headers.host = UPSTREAM_AUTHORITY;
+  headers.origin = UPSTREAM_ORIGIN;
+  for (const name of FORWARDING_HEADERS) delete headers[name];
   return headers;
 }
 
@@ -899,8 +917,18 @@ function serveManifest(req, res) {
 // dsh cookie, so this does not widen who can reach the API — it only stops
 // the page from disabling itself. Patching here survives dsh upgrades, which
 // re-download the package and would wipe an edit inside it.
-const SETTINGS_BUNDLE_RE = /\/plugins\/(?:[^/]+\/)?dsh-client-ui-settings\/client\.js$/u;
+// Client bundles are not addressed as `/plugins/<id>/client.js`: dsh serves
+// them through its combo route, `/plugins/??<id>/client.js[,<id>/client.js…]&rev=…`,
+// where the whole plugin list is the *query string* and the pathname is just
+// `/plugins/`. So match the full request URL, and accept the settings package
+// wherever it appears in that list (the `.map` and the `-models`/`-general`
+// siblings must not match: `/client.js` immediately after the package name
+// already excludes the siblings, and the lookahead excludes source maps).
+const SETTINGS_BUNDLE_RE = /\/plugins\/[^\s]*\bdsh-client-ui-settings\/client\.js(?!\.map)/u;
 const PERSISTENCE_GATE_RE = /ctx\.remote\.\$host\.isLoopback\s*\?\s*"host"\s*:\s*"memory"/u;
+// dshmarket's one-click restart; the bridge handles it itself (see the request
+// handler) rather than letting a detached replacement race its supervision.
+const MARKET_RESTART_PATH = '/dsh-market/restart';
 
 function patchSettingsBundle(body) {
   const text = body.toString('utf8');
@@ -1120,8 +1148,24 @@ const server = http.createServer((req, res) => {
 
   // Settings -> Models disables itself on a non-loopback origin; serve that one
   // bundle with the gate opened. See the note on patchSettingsBundle above.
-  if (req.method === 'GET' && SETTINGS_BUNDLE_RE.test(url.pathname)) {
+  // Matched against the full URL: the bundle is the `??` combo form.
+  if (req.method === 'GET' && SETTINGS_BUNDLE_RE.test(req.url ?? '')) {
     serveSettingsBundle(req, res);
+    return;
+  }
+
+  // The market's one-click restart wants to spawn a detached replacement dsh.
+  // Under the bridge that collides with its own supervision — two processes,
+  // one port — so the bridge, which owns dsh's lifecycle here, answers the
+  // request and restarts its child instead: stop it, and let the next request
+  // cold-start it. That is also what loads a freshly updated plugin. The
+  // market's client accepts 202 {ok:true} and then polls /dsh-market/status
+  // for a new boot id, which the restarted dsh provides.
+  if (req.method === 'POST' && url.pathname === MARKET_RESTART_PATH) {
+    res.writeHead(202, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+    res.end(`${JSON.stringify({ ok: true, bridge: true })}\n`);
+    log('market restart requested — stopping dsh; the next request cold-starts it');
+    setTimeout(() => stopChild('market restart'), 250).unref();
     return;
   }
 
@@ -1134,9 +1178,9 @@ const server = http.createServer((req, res) => {
 
 server.on('upgrade', (req, socket, head) => {
   lastRequestAt = Date.now();
-  // Same trust decision as the HTTP path, and the same normalization: dsh's
-  // WebSocket fence compares Origin to Host too, so the handshake must reach it
-  // with the loopback authority and without the browser's Origin.
+  // Same trust decision as the HTTP path, and the same normalization: the
+  // handshake must reach dsh as a loopback one, with an Origin that matches
+  // that loopback Host and no forwarding trace.
   const rejected = rejectReason(req);
   if (rejected !== null) {
     log(`refusing upgrade ${req.url ?? '?'}: ${rejected}`);
@@ -1153,13 +1197,14 @@ server.on('upgrade', (req, socket, head) => {
       const name = req.rawHeaders[i];
       const lower = String(name).toLowerCase();
       if (lower === 'host') {
-        raw += `${name}: ${UPSTREAM_HOST}:${UPSTREAM_PORT}\r\n`;
+        raw += `${name}: ${UPSTREAM_AUTHORITY}\r\n`;
         continue;
       }
-      if (lower === 'origin') continue;
+      if (lower === 'origin') continue; // added below, matching the authority
+      if (FORWARDING_HEADERS.includes(lower)) continue;
       raw += `${name}: ${req.rawHeaders[i + 1]}\r\n`;
     }
-    raw += `X-Forwarded-Host: ${req.headers.host ?? PUBLIC_HOST}\r\n\r\n`;
+    raw += `Origin: ${UPSTREAM_ORIGIN}\r\n\r\n`;
     upstream.write(raw);
     if (head !== undefined && head.length > 0) upstream.write(head);
     upstream.pipe(socket);
