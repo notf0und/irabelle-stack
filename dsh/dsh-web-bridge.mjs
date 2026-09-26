@@ -759,7 +759,18 @@ function isAllowedAuthority(host) {
 function rejectReason(req) {
   const host = req.headers.host;
   if (!isAllowedAuthority(host)) return `Host ${host ?? '(none)'} is not ${PUBLIC_HOST}`;
-  if (String(req.headers['sec-fetch-site'] ?? '').toLowerCase() === 'cross-site') return 'cross-site request';
+  // Cross-site is refused only where it could change something. A top-level
+  // navigation is *legitimately* cross-site — that is exactly what the
+  // redirect back from authentik's login is (`Sec-Fetch-Site: cross-site` and
+  // no Origin) — and refusing that answered the installed PWA with
+  // "forbidden". dshmarket's mutating routes, the reason this gate exists at
+  // all, are POSTs; they also carry a mismatching Origin, which the check
+  // below catches, so nothing is loosened for them.
+  const method = String(req.method ?? 'GET').toUpperCase();
+  if (method !== 'GET' && method !== 'HEAD' && method !== 'OPTIONS'
+      && String(req.headers['sec-fetch-site'] ?? '').toLowerCase() === 'cross-site') {
+    return 'cross-site request';
+  }
   const origin = req.headers.origin;
   if (origin !== undefined) {
     let originHost;
