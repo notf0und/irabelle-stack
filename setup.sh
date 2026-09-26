@@ -465,11 +465,25 @@ done
 
 # --- 2. the shared network ---------------------------------------------------
 say "Docker network"
+# Containers take the bridge's MTU, and a PPPoE uplink's path MTU is 1492, not
+# 1500. With a 1500 bridge, Docker's NAT hides the router's ICMP "fragmentation
+# needed" from the container, so a connection past the PPPoE link black-holes:
+# the TCP handshake and small replies get through, then the TLS handshake — or
+# any large reply — hangs (openlibrary.org and archive.org are the usual
+# victims). 1492 is the PPPoE ceiling and costs nothing on plain Ethernet.
+# Override DOCKER_MTU in host.env for a different access technology.
+DOCKER_MTU=$(host_env_get DOCKER_MTU)
+DOCKER_MTU=${DOCKER_MTU:-1492}
 if docker network inspect app-bridge >/dev/null 2>&1; then
   note "app-bridge already exists"
+  have_mtu=$(docker network inspect app-bridge \
+    --format '{{index .Options "com.docker.network.driver.mtu"}}' 2>/dev/null || true)
+  if [ "${have_mtu:-1500}" != "$DOCKER_MTU" ]; then
+    warn "app-bridge MTU is ${have_mtu:-1500}, not $DOCKER_MTU — recreate it to apply (see NETWORK.md)"
+  fi
 else
-  docker network create app-bridge >/dev/null
-  note "created app-bridge"
+  docker network create --opt com.docker.network.driver.mtu="$DOCKER_MTU" app-bridge >/dev/null
+  note "created app-bridge (MTU $DOCKER_MTU)"
 fi
 
 # Pi-hole's web UI has no password — authentik in front of it is the login —

@@ -68,3 +68,8 @@ networks:
   app-bridge:
     driver: bridge
     name: app-bridge
+    # A PPPoE uplink's path MTU is 1492, and a 1500 bridge black-holes large
+    # replies through Docker's NAT (see setup.sh). setup.sh creates this network
+    # with that MTU; this is the fallback when Compose makes it instead.
+    driver_opts:
+      com.docker.network.driver.mtu: "${DOCKER_MTU:-1492}"

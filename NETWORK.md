@@ -198,6 +198,17 @@ container already gets *internet, no LAN*, for free, and keeps Docker's
 per-container isolation, which macvlan throws away (macvlan traffic bypasses the
 host's iptables entirely).
 
+A bridge container also inherits the **bridge's MTU**, and that is where a PPPoE
+uplink bites: its path MTU is 1492, not 1500. On a 1500 bridge, Docker's NAT
+hides the router's ICMP "fragmentation needed", so a connection past the PPPoE
+link black-holes — TCP connects, small replies arrive, then the TLS handshake or
+any large reply hangs. `openlibrary.org` and `archive.org` are the classic
+victims, and it looks exactly like a DNS or firewall block even though neither
+is involved. `setup.sh` creates `app-bridge` with
+`com.docker.network.driver.mtu=1492` for this; `DOCKER_MTU` in `host.env`
+overrides it. An existing network keeps its old MTU until it is recreated (see
+the gotchas).
+
 Give each service its own network and let Traefik be the only multi-homed
 container. A star, not a mesh:
 
@@ -335,4 +346,20 @@ On the client router, after the host side is up:
   rather than guess — guessing "bridge" is how a macvlan network gets created
   with the wrong connectivity.
 - **`--down` refuses while containers are attached.** Stop the stacks first.
+- **A bridge's MTU is fixed when it is created.** A network made before the MTU
+  was set keeps the old one, and Docker cannot change it in place, so an existing
+  install has to recreate `app-bridge`:
+
+  ```sh
+  ctrs=$(docker ps -aq --filter network=app-bridge)
+  docker stop $ctrs
+  docker network rm app-bridge
+  docker network create --opt com.docker.network.driver.mtu=1492 app-bridge
+  docker start $ctrs
+  ```
+
+  The containers reconnect by name and pick up the new MTU when they start. To
+  make 1492 the default for *every* new network instead, put `"mtu": 1492` in
+  `/etc/docker/daemon.json` and restart Docker — that also needs each
+  already-created network recreated to take effect.
 
