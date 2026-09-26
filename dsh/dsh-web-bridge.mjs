@@ -118,6 +118,17 @@ const NPX_CACHE = env.DSH_NPX_CACHE || path.join(os.homedir(), '.npm', '_npx');
 const NATIVE_PICKER = /^(1|true|yes)$/i.test(env.DSH_NATIVE_PICKER || '');
 const PICKER_ENV = NATIVE_PICKER ? {} : { DISPLAY: '', WAYLAND_DISPLAY: '' };
 
+// A bridge restart is when a changed bridge file starts running, and a browser
+// can keep reusing the bundle it cached from the previous one — its cache entry
+// decides, not a validator, so a plain refresh can still run the old code and a
+// freshly installed PWA inherits the same cache. Sending
+// `Clear-Site-Data: "cache"` on the first document served after the restart
+// makes every client drop that cache on its next load, so the new bundle is
+// fetched instead of the stale one. Once per bridge boot, not per request, and
+// only the HTTP cache — never storage, which holds the app's own state.
+const CACHE_CLEAR_ON_BOOT = !/^(0|false|no)$/i.test(env.DSH_CACHE_CLEAR || '');
+let cacheClearArmed = CACHE_CLEAR_ON_BOOT;
+
 // When set, every cold start resolves and downloads the tracked tag *before*
 // choosing a copy, so the instance that comes up is the newest release rather
 // than whatever a background refresh happened to fetch during the previous
@@ -1065,6 +1076,14 @@ function forward(req, res, upstreamPath, injected, allowRetry) {
       const headers = { ...upstreamRes.headers };
       if (headers['set-cookie'] !== undefined) {
         headers['set-cookie'] = headers['set-cookie'].map(fixCookie);
+      }
+      // One document per bridge boot carries this, so a client that cached the
+      // previous bundle drops it and fetches the current one.
+      if (cacheClearArmed && req.method === 'GET' &&
+          new URL(req.url || '/', 'http://placeholder').pathname === '/') {
+        cacheClearArmed = false;
+        headers['clear-site-data'] = '"cache"';
+        log('sent Clear-Site-Data: cache — this client will re-fetch the changed bundle');
       }
       res.writeHead(upstreamRes.statusCode || 502, headers);
       upstreamRes.pipe(res);
