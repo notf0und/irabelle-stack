@@ -21,6 +21,11 @@
 #   downloads/incomplete             in progress
 #   downloads/{tv,movies}            the libraries Sonarr/Radarr import into
 #
+# Transmission gets zero seed goals, so a torrent stops the instant it is
+# complete. Sonarr/Radarr only remove a torrent from the client once it has
+# stopped, so with no seed goal a finished download would sit at 100% forever.
+# Nothing is seeded with 0 — raise the goals for a private tracker's ratio.
+#
 # ./setup.sh wires everything together over the apps' APIs (see
 # integrations.py): Prowlarr to Sonarr/Radarr/Byparr and the public indexers,
 # Transmission as the download client, Bazarr, Lingarr and Cleanuparr to both.

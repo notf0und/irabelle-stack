@@ -870,13 +870,13 @@ Run by hand like that it is also what claims Plex (below).
 
 | App | Login | What `integrations.py` sets up |
 | --- | --- | --- |
-| Sonarr, Radarr | authentik forward auth (app login set to External) | root folder, Transmission as download client (into `downloads/torrents/…`), a Plex connection once Plex is claimed |
+| Sonarr, Radarr | authentik forward auth (app login set to External) | root folder, Transmission as download client (into `downloads/torrents/…`), default quality profile `HD - 720p/1080p` with Remux-1080p off, "Unmonitor Deleted", a Plex connection once Plex is claimed |
 | Prowlarr | forward auth (External) | Sonarr and Radarr as apps (full sync, so they get every indexer), Byparr as the Cloudflare proxy, Transmission, and station's working public trackers — 1337x, EZTV and Torrent Downloads through Byparr |
 | Bazarr | forward auth | Sonarr and Radarr, an English language profile as the default, the providers that need no account (embedded subtitles, Subf2m, BSPlayer) |
 | Lingarr | forward auth | first-run screen, Sonarr and Radarr. No languages: pick source and target in its UI to start translating |
 | Cleanuparr | authentik over OIDC | your account, Sonarr, Radarr, Transmission, the queue cleaner and the malware blocker |
-| Transmission, Byparr | forward auth | download and in-progress directories |
-| Plex | its own (your Plex account) | the Movies and TV Shows libraries, once claimed |
+| Transmission, Byparr | forward auth | download and in-progress directories, and seed goals at 0 so a finished torrent stops at once and can be removed |
+| Plex | its own (your Plex account) | the Movies and TV Shows libraries, and library scanning (on change, and hourly), once claimed |
 | Kavita | authentik over OIDC | your admin account, the Books library (CWA's Calibre library), and the API key books-glue uses |
 | Shelfmark | authentik over OIDC | your admin account, Prowlarr (switched on) and Transmission for torrents, the path between Transmission and CWA's ingest folder, Byparr for Cloudflare, the Library button to CWA, and the login books-glue's mirror refresh uses |
 | Calibre-Web-Automated | forward auth, then authentik's username header | its default `admin` renamed to your login and given your password |
@@ -897,6 +897,18 @@ A few things worth knowing:
   <https://plex.tv/claim> (valid four minutes — get it right before), restarts
   Plex with it, and then creates the libraries and connects Sonarr and Radarr
   on that same run. Enter skips; the cron runs never ask.
+* **Finished torrents leave Transmission on their own.** Transmission's seed
+  goals are both 0, so a torrent stops the instant it completes; Sonarr/Radarr
+  then remove it from the client — their "Remove Completed" only removes a
+  torrent the client reports stopped, so without a seed goal completed
+  downloads pile up at 100% forever. Nothing is seeded with 0: raise
+  `ratio-limit` / `idle-seeding-limit` if a private tracker needs a ratio. The
+  library copy is a hardlink, so the media survives the torrent's removal.
+  Plex's scanner is switched on as well (on file changes, and hourly), so a
+  new import shows up without a manual "Scan Library Files".
+* **Deleting from Plex does not download it again.** Sonarr and Radarr have
+  "Unmonitor Deleted Episodes/Movies" on, so when a file is deleted the next
+  disk scan unmonitors it instead of searching for it and pulling it back.
 * **E-readers.** CWA's `/opds` and `/kobo` paths skip authentik (an e-reader
   cannot do that login) and use CWA's own password — your authentik one, as
   set by `integrations.py`. Kavita's OPDS URL carries its own key. Calibre's

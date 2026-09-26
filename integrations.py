@@ -270,6 +270,15 @@ def field(item, name):
     return None
 
 
+def quality_leaves(items):
+    """Every leaf quality in a quality profile's item tree."""
+    for item in items:
+        if item.get("quality") is not None:
+            yield item
+        elif item.get("items"):
+            yield from quality_leaves(item["items"])
+
+
 # --- Transmission -----------------------------------------------------------
 @section("Transmission", needs=[("transmission", 9091, "/transmission/web/")])
 def transmission(transmission):
@@ -290,16 +299,27 @@ def transmission(transmission):
                 sid = e.headers.get("X-Transmission-Session-Id", "")
         raise RuntimeError("no Transmission session id")
 
+    # Both seed goals are 0: Transmission pauses a torrent the moment it is
+    # complete, which is what Sonarr and Radarr require before they will remove
+    # it ("Remove Completed" only removes a stopped torrent). With a non-zero
+    # goal the torrent keeps seeding, Sonarr/Radarr move on, and it sits there
+    # at 100% for good. Nothing is seeded with 0 — raise these if you need a
+    # private tracker's ratio.
     want = {"download-dir": "/data/downloads/torrents",
             "incomplete-dir": "/data/downloads/incomplete",
-            "incomplete-dir-enabled": True}
+            "incomplete-dir-enabled": True,
+            "idle-seeding-limit-enabled": True,
+            "idle-seeding-limit": 0,
+            "seedRatioLimited": True,
+            "seedRatioLimit": 0}
     cur = call("session-get")
     change = {k: v for k, v in want.items() if cur.get(k) != v}
     if change:
         call("session-set", change)
-        note("downloads go to /data/downloads/torrents, in progress to .../incomplete")
+        note("downloads to /data/downloads/torrents, in progress to .../incomplete; "
+             "seed goals at 0 so a finished torrent stops at once and is removed")
     else:
-        note("download directories already set")
+        note("download directories and seed goals already set")
 
 
 # --- Plex -------------------------------------------------------------------
@@ -357,6 +377,18 @@ def plex(plex):
                                     "language": "en-US", "location": path})
         api.call("POST", "/library/sections?" + q, raw=True)
         note(f"library {name}: {path}")
+    # Plex only turns a queued library update into a real scan when one of its
+    # own scan settings is on. With both off, the connection Sonarr and Radarr
+    # get below is accepted and then dropped, so new imports show up only after
+    # a manual "Scan Library Files" — turn automatic and hourly scanning on.
+    prefs = urllib.parse.urlencode({
+        "FSEventLibraryUpdatesEnabled": 1,
+        "FSEventLibraryPartialScanEnabled": 1,
+        "ScheduledLibraryUpdatesEnabled": 1,
+        "ScheduledLibraryUpdateInterval": 3600,
+    })
+    api.call("PUT", "/:/prefs?" + prefs, raw=True)
+    note("library scanning: on file changes (partial) and hourly")
 
 
 # --- Sonarr and Radarr ------------------------------------------------------
@@ -371,10 +403,48 @@ def wire_arr(api, kind):
     else:
         note(f"root folder {library} exists")
 
+    # "Unmonitor Deleted Episodes" / "Unmonitor Deleted Movies": deleting
+    # something from Plex removes the file, the next disk scan sees it is gone
+    # and the app stops monitoring it, instead of searching for it and pulling
+    # it back down.
+    media = api.get("/config/mediamanagement")
+    flag = "autoUnmonitorPreviouslyDownloadedEpisodes" if tv else "autoUnmonitorPreviouslyDownloadedMovies"
+    if not media.get(flag):
+        media[flag] = True
+        api.put("/config/mediamanagement", media)
+        note("unmonitor deleted: on (a Plex delete is not downloaded again)")
+    else:
+        note("unmonitor deleted already on")
+
+    # The built-in "HD - 720p/1080p" profile is what everything is added with,
+    # and Remux-1080p is switched off in it: a 1080p remux is several times the
+    # size of a Bluray/WEB 1080p and is not wanted here. Setting the profile on
+    # the import lists is what makes it the default for automatically added
+    # media (there is no server-wide "default profile" setting in the apps).
+    profile = next((p for p in api.get("/qualityprofile") if p["name"] == "HD - 720p/1080p"), None)
+    if profile is None:
+        note('quality profile "HD - 720p/1080p" missing — profiles left alone')
+    else:
+        remuxes = [q for q in quality_leaves(profile["items"])
+                   if "1080" in q["quality"]["name"] and "remux" in q["quality"]["name"].lower()]
+        if any(q["allowed"] for q in remuxes):
+            for q in remuxes:
+                q["allowed"] = False
+            api.put(f"/qualityprofile/{profile['id']}", profile)
+            note(f'quality profile {profile["name"]}: Remux-1080p off')
+        else:
+            note(f'quality profile {profile["name"]}: Remux-1080p already off')
+        for il in api.get("/importlist"):
+            if il.get("qualityProfileId") != profile["id"]:
+                il["qualityProfileId"] = profile["id"]
+                api.put(f"/importlist/{il['id']}", il)
+                note(f'import list {il["name"]}: quality profile -> {profile["name"]}')
+
     if not any(c["implementation"] == "Transmission" for c in api.get("/downloadclient")):
         schema = next(s for s in api.get("/downloadclient/schema") if s["implementation"] == "Transmission")
-        # A directory, not a category: Transmission has no categories of its
-        # own, and the app refuses both at once.
+        # A directory, not a category. Transmission has labels of its own, but
+        # Sonarr and Radarr refuse a Category and a Directory at the same time,
+        # and the directory is what keeps TV and movies in separate drop folders.
         client = fill(schema, host="transmission", port=9091, urlBase="/transmission/",
                       **({"tvDirectory": drop, "tvCategory": ""} if tv
                          else {"movieDirectory": drop, "movieCategory": ""}))
