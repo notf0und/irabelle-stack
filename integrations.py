@@ -771,6 +771,11 @@ def shelfmark_wanted():
         "advanced.json": {
             "PROWLARR_REMOTE_PATH_MAPPINGS": [{"host": "transmission", "remotePath": "/data/downloads/complete/books",
                                                "localPath": "/cwa-book-ingest"}]},
+        # The image's "folder" output defaults to /books, a path this container
+        # does not mount: the download lands in the container's writable layer
+        # and CWA never sees it. Copy into the ingest folder Shelfmark already
+        # has at /cwa-book-ingest, which is the same host folder CWA watches.
+        "downloads.json": {"BOOKS_OUTPUT_MODE": "folder", "DESTINATION": "/cwa-book-ingest"},
         "security.json": {
             "AUTH_METHOD": "oidc",
             "OIDC_DISCOVERY_URL": f"https://authentik.{TLD}/application/o/shelfmark/.well-known/openid-configuration",
@@ -840,6 +845,7 @@ def shelfmark(shelfmark):
         add = {k: v for k, v in want.items()
                if k not in cur or cur[k] in ("", None, [], "none")
                or (v is True and cur[k] is False and f"{name}:{k}" not in switched)
+               or (name == "downloads.json" and k == "DESTINATION" and cur[k] == "/books")
                or (name == "security.json" and cur.get("AUTH_METHOD") in (None, "none"))}
         if add:
             changes[path] = {**cur, **add}

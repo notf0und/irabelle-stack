@@ -878,7 +878,7 @@ Run by hand like that it is also what claims Plex (below).
 | Transmission, Byparr | forward auth | download and in-progress directories, and seed goals at 0 so a finished torrent stops at once and can be removed |
 | Plex | its own (your Plex account) | the Movies and TV Shows libraries, and library scanning (on change, and hourly), once claimed |
 | Kavita | authentik over OIDC | your admin account, the Books library (CWA's Calibre library), and the API key books-glue uses |
-| Shelfmark | authentik over OIDC | your admin account, Prowlarr (switched on) and Transmission for torrents, the path between Transmission and CWA's ingest folder, Byparr for Cloudflare, the Library button to CWA, and the login books-glue's mirror refresh uses |
+| Shelfmark | authentik over OIDC | your admin account, Prowlarr (switched on) and Transmission for torrents, the path between Transmission and CWA's ingest folder (and its own output folder pointed at it), Byparr for Cloudflare, the Library button to CWA, and the login books-glue's mirror refresh uses |
 | Calibre-Web-Automated | forward auth, then authentik's username header | its default `admin` renamed to your login and given your password |
 | Calibre | forward auth | — |
 
