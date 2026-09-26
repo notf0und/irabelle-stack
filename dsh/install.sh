@@ -275,12 +275,54 @@ EOF
 ensure_npm || exit 1
 note "npm $(npm --version), npx $(command -v npx)"
 
-# dsh-mobile's installer materializes the profile with pnpm. If pnpm is absent,
-# put a shim on PATH that forwards to npx rather than failing the whole install.
-if ! command -v pnpm >/dev/null 2>&1 && command -v corepack >/dev/null 2>&1; then
-  corepack enable pnpm >/dev/null 2>&1 || true
-fi
-if ! command -v pnpm >/dev/null 2>&1; then
+# pnpm materializes the profile, and it is not an install-time-only need: every
+# later `dsh plugin add/remove` — including the Plugin Market's own update
+# button — runs pnpm in the service's environment. `corepack enable` is the
+# documented route, but it writes its shim next to node, which on a distro node
+# means /usr/bin and root. npm's user-level global prefix always works, and the
+# unit carries @HOME@/.local/bin on PATH, so install it there.
+ensure_pnpm() {
+  if command -v pnpm >/dev/null 2>&1 && pnpm --version >/dev/null 2>&1; then
+    return 0
+  fi
+  warn "pnpm is missing — the profile and every plugin operation need it."
+  local bin="$HOME/.local/bin" log="$TMP/pnpm-install.log" want tool
+  mkdir -p "$bin"
+  # A corepack shim written here without its cached release fails at run time,
+  # and npm refuses to replace an existing link, so clear ours out first.
+  for tool in pnpm pnpx; do
+    if [ -L "$bin/$tool" ] && readlink "$bin/$tool" 2>/dev/null | grep -q corepack; then
+      rm -f "$bin/$tool"
+      note "removed a stale corepack shim at $bin/$tool"
+    fi
+  done
+  # pnpm's package carries its platform binary as an optional dependency, so it
+  # has to be installed by npm rather than unpacked from a tarball. Older majors
+  # are retried for a node that is too old for the current release.
+  for want in latest 9 8; do
+    note "installing pnpm@$want for $(id -un) — this can take a moment"
+    if npm install --global --prefix "$HOME/.local" "pnpm@$want" >>"$log" 2>&1; then
+      PATH="$bin:$PATH"
+      export PATH
+      hash -r 2>/dev/null || true
+      if pnpm --version >/dev/null 2>&1; then
+        note "pnpm $(pnpm --version) installed at $bin/pnpm"
+        return 0
+      fi
+    fi
+  done
+  warn "npm could not install pnpm:"
+  tail -n 3 "$log" 2>/dev/null | while IFS= read -r line; do warn "  $line"; done
+  if command -v corepack >/dev/null 2>&1; then
+    corepack enable --install-directory "$bin" pnpm >/dev/null 2>&1 || true
+    hash -r 2>/dev/null || true
+    if pnpm --version >/dev/null 2>&1; then
+      note "pnpm enabled through corepack at $bin/pnpm"
+      return 0
+    fi
+  fi
+  # Last resort: carry this run, and say so, because plugin operations later
+  # (the market's update button) will run without pnpm.
   PKG_BIN="$TMP/bin"
   mkdir -p "$PKG_BIN"
   cat >"$PKG_BIN/pnpm" <<'EOF'
@@ -290,8 +332,11 @@ EOF
   chmod +x "$PKG_BIN/pnpm"
   PATH="$PKG_BIN:$PATH"
   export PATH
-  note "pnpm not installed — using a temporary npx shim for this run"
-fi
+  warn "using a temporary pnpm shim for this run only — install pnpm for $(id -un) to keep plugin operations working"
+  return 1
+}
+
+ensure_pnpm || true
 
 # --- the dsh profile and the plugin -----------------------------------------
 say "DeepSeek Harness profile ($DSH_PROFILE)"

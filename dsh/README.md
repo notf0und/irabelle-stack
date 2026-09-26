@@ -44,8 +44,11 @@ Idempotent, safe to re-run:
 2. checks Node.js (20+; 22+ recommended) and **installs npm when it is
    missing** — first through the distro's package manager, then by fetching
    npm's own tarball — since Debian/Ubuntu ship `nodejs` and `npm` separately
-   and npx comes with npm. If `pnpm` is missing it uses a temporary
-   `npx pnpm` shim for the plugin install;
+   and npx comes with npm. It also installs **pnpm** under `~/.local` when it
+   is missing, because pnpm is not just an install-time helper: the market's
+   own update button runs it too. `corepack enable` is tried first but usually
+   cannot help, since a distro node keeps its shims in `/usr/bin`; the `npx`
+   shim is only a last resort for the run, and says so;
 3. bootstraps the DSH profile (`~/.dsh/profiles/web`) and seeds the `npx`
    cache the bridge reads;
 4. clones/updates [dsh-mobile][] into `dsh/.dsh-mobile` and installs it into
@@ -197,6 +200,7 @@ page saying so and resumes once that one exits.
 | Settings → Models says *"settings are unavailable in this browser"* | dsh's own settings gate — the bridge should have forced it open and logged *"serving settings bundle with host persistence forced"*; if it logged *"did not match"*, upstream changed the bundle |
 | A plugin's update/save button says *"untrusted origin"* | the bridge normalizes Host/Origin for the mutating routes; if you still see it, a dashboard or client is bypassing `dsh.$TLD` |
 | npm is missing on the host | `./dsh/install.sh` installs it; if that failed, see the warning it printed (needs sudo, or `curl`+`tar` for the tarball fallback) |
+| pnpm is missing on the host | `./dsh/install.sh` installs it under `~/.local` (which the unit has on `PATH`); a broken `corepack` shim left there by an earlier run is replaced. Without pnpm, plugin add/remove and the market's update button fail |
 
 [dsh-mobile]: https://github.com/notf0und/dsh-mobile
 [pwa]: https://github.com/deepseek-ai/deepseek-harness/discussions/3736

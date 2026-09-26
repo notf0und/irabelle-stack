@@ -777,11 +777,11 @@ being asked.
 ./dsh/uninstall.sh         # remove it (--purge also deletes ~/.dsh and dsh/.env)
 ```
 
-It creates `dsh/.env` (TLD from the root `.env`), installs npm if the host has
-Node without it, bootstraps the DSH profile, clones and installs `dsh-mobile`,
-renders and starts the systemd user service, enables lingering so it survives
-logging out of SSH, and renders `traefik/config/certificates/dsh.yml` — the
-route in Traefik's file provider. The authentik half is the `dsh-provider`
+It creates `dsh/.env` (TLD from the root `.env`), installs npm and pnpm if the
+host has Node without them, bootstraps the DSH profile, clones and installs
+`dsh-mobile`, renders and starts the systemd user service, enables lingering so
+it survives logging out of SSH, and renders
+`traefik/config/certificates/dsh.yml` — the route in Traefik's file provider. The authentik half is the `dsh-provider`
 forward-auth provider in the blueprint above. `update.sh` only ever
 **refreshes an install that already exists** (`--no-restart`), so nothing
 installs dsh behind your back.
