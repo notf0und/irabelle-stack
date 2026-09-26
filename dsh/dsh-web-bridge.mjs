@@ -807,6 +807,31 @@ function upstreamHeaders(req) {
   return headers;
 }
 
+// A body the bridge rewrites must never be revalidated. The upstream ETag
+// describes the bytes *before* the rewrite, so a browser that cached an
+// earlier, unpatched copy sends `If-None-Match`, dsh answers 304, the rewrite
+// is skipped, and the stale copy is reused forever — which is exactly how the
+// Settings -> Models fix appeared not to work on an instance whose browser had
+// cached the bundle from before it was deployed. Those two paths therefore ask
+// upstream unconditionally and answer without validators, and `cache-control:
+// no-store` keeps the rewritten bytes from being cached at all.
+const CONDITIONAL_REQUEST_HEADERS = ['if-match', 'if-none-match', 'if-modified-since', 'if-unmodified-since', 'if-range'];
+
+function unconditionalRequestHeaders(req) {
+  const headers = upstreamHeaders(req);
+  for (const name of CONDITIONAL_REQUEST_HEADERS) delete headers[name];
+  return headers;
+}
+
+function rewrittenResponseHeaders(headers) {
+  const out = { ...headers };
+  delete out['content-length'];
+  delete out['content-encoding'];
+  delete out.etag;
+  delete out['last-modified'];
+  return out;
+}
+
 /** Serve one of the bridge's own PNG icons (referenced from the patched manifest). */
 function serveIcon(res, name) {
   const file = path.join(ICON_DIR, name);
@@ -845,7 +870,7 @@ function needsRasterIcons(manifest) {
  * decoded defensively in case a server compresses regardless.
  */
 function serveManifest(req, res) {
-  const requestHeaders = upstreamHeaders(req);
+  const requestHeaders = unconditionalRequestHeaders(req);
   delete requestHeaders['accept-encoding'];
   const upstream = http.request(
     {
@@ -902,10 +927,8 @@ function serveManifest(req, res) {
           }
         }
         // Whatever went in, what goes out is now plain JSON of known length.
-        delete headers['content-length'];
-        delete headers['content-encoding'];
         res.writeHead(status, {
-          ...headers,
+          ...rewrittenResponseHeaders(headers),
           'content-type': 'application/manifest+json',
           'content-length': String(output.length),
           'cache-control': 'no-store',
@@ -959,7 +982,7 @@ function patchSettingsBundle(body) {
 }
 
 function serveSettingsBundle(req, res) {
-  const requestHeaders = upstreamHeaders(req);
+  const requestHeaders = unconditionalRequestHeaders(req);
   delete requestHeaders['accept-encoding'];
   const upstream = http.request(
     {
@@ -998,10 +1021,8 @@ function serveSettingsBundle(req, res) {
             log('serving settings bundle with host persistence forced (non-loopback browser)');
           }
         }
-        delete headers['content-length'];
-        delete headers['content-encoding'];
         res.writeHead(status, {
-          ...headers,
+          ...rewrittenResponseHeaders(headers),
           'content-length': String(output.length),
           'cache-control': 'no-store',
         });

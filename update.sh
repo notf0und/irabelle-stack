@@ -172,14 +172,27 @@ fi
 
 # --- the DeepSeek Harness (a host service, not a stack) ------------------------
 # Refresh dsh only if it is installed — it is opt-in, and setup.sh asks before
-# creating one (see the DSH_INSTALL note there). --no-restart on purpose: this
-# runs from cron, where there is no user D-Bus to talk to, and a restart would
-# kill any turn in flight. The bridge cold-starts the harness on the next
-# request, which is when a refreshed plugin takes effect.
+# creating one (see the DSH_INSTALL note there). Plugin and package changes
+# apply on the next cold start, which is why this does not restart on its own:
+# from cron a restart would kill any turn in flight. The bridge file is the
+# exception — the unit runs it straight from this checkout, so a change to it
+# needs the process replaced; restart for exactly that case.
 if [ "$DRY_RUN" = 0 ] && [ -x "$REPO_DIR/dsh/install.sh" ] \
    && [ -f "$HOME/.config/systemd/user/dsh-web.service" ]; then
-  "$REPO_DIR/dsh/install.sh" --no-restart \
-    || echo "dsh/install.sh failed — run it by hand: $REPO_DIR/dsh/install.sh" >&2
+  bridge_changed=no
+  if [ -n "${before:-}" ] && [ -n "${after:-}" ] && [ "$before" != "$after" ] \
+     && git -C "$REPO_DIR" diff --name-only "$before" "$after" 2>/dev/null \
+        | grep -qx 'dsh/dsh-web-bridge.mjs'; then
+    bridge_changed=yes
+  fi
+  if [ "$bridge_changed" = yes ]; then
+    note "dsh bridge changed in this pull — restarting dsh-web to load it"
+    "$REPO_DIR/dsh/install.sh" \
+      || echo "dsh/install.sh failed — run it by hand: $REPO_DIR/dsh/install.sh" >&2
+  else
+    "$REPO_DIR/dsh/install.sh" --no-restart \
+      || echo "dsh/install.sh failed — run it by hand: $REPO_DIR/dsh/install.sh" >&2
+  fi
 fi
 
 say "Dockhand at $DOCKHAND_URL"

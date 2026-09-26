@@ -379,13 +379,32 @@ if command -v loginctl >/dev/null 2>&1 && command -v sudo >/dev/null 2>&1; then
   fi
 fi
 
+# `systemctl --user` needs the user manager's runtime dir. A bare SSH command
+# (or cron) does not have it, which is the usual reason a restart looks like it
+# did nothing; fill it in instead of giving up.
+: "${XDG_RUNTIME_DIR:=/run/user/$(id -u)}"
+export XDG_RUNTIME_DIR
+if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ] && [ -S "$XDG_RUNTIME_DIR/bus" ]; then
+  DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
+  export DBUS_SESSION_BUS_ADDRESS
+fi
+
 if ! systemctl --user daemon-reload 2>/dev/null; then
   warn "systemd --user is not reachable in this session (no user D-Bus)."
   warn "Start it from a normal login: systemctl --user enable --now dsh-web.service"
 elif [ "$RESTART" = yes ]; then
   systemctl --user enable dsh-web.service >/dev/null 2>&1 || true
+  # The unit runs dsh-web-bridge.mjs straight from this checkout, so a bridge
+  # change only takes effect when the process is replaced. Confirm it actually
+  # was, rather than reporting a restart that did not happen.
+  main_before=$(systemctl --user show dsh-web.service -p MainPID --value 2>/dev/null || true)
   if systemctl --user restart dsh-web.service 2>/dev/null; then
-    note "dsh-web.service restarted"
+    main_after=$(systemctl --user show dsh-web.service -p MainPID --value 2>/dev/null || true)
+    if [ -n "$main_after" ] && [ "$main_after" != "${main_before:-}" ]; then
+      note "dsh-web.service restarted (pid ${main_before:-none} -> $main_after) — the bridge file now runs"
+    else
+      note "dsh-web.service restarted"
+    fi
   else
     warn "could not restart dsh-web.service — check: systemctl --user status dsh-web"
   fi
