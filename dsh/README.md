@@ -50,9 +50,16 @@ Idempotent, safe to re-run:
    cache the bridge reads;
 4. clones/updates [dsh-mobile][] into `dsh/.dsh-mobile` and installs it into
    the profile;
-5. renders `~/.config/systemd/user/dsh-web.service` and (re)starts it;
-6. enables lingering, so the service survives logging out of SSH;
-7. renders `traefik/config/certificates/dsh.yml` (the route the file provider
+5. installs the plugins listed in `DSH_PLUGINS` — by default
+   [dshmarket](https://github.com/dsh-market/dsh-market) from npm and
+   [dsh-opencode-sounds](https://github.com/notf0und/dsh-opencode-sounds) from
+   its git URL — with `dsh plugin add`, which also adds each to
+   `dsh.profile.bundles`. Nothing is vendored; the profile is only *referenced*
+   to the packages. An entry already in the profile is left alone, so the
+   market's own update button owns its version afterwards;
+6. renders `~/.config/systemd/user/dsh-web.service` and (re)starts it;
+7. enables lingering, so the service survives logging out of SSH;
+8. renders `traefik/config/certificates/dsh.yml` (the route the file provider
    watches) and asks `cert-watcher.sh` for the certificate.
 
 The authentik half — a forward-auth provider for `dsh.$TLD` — is a blueprint
@@ -123,6 +130,7 @@ key); re-run `./dsh/install.sh` after a change.
 | `UPDATE_HOURS` | `1` | background check while running (`0` disables) |
 | `DSH_CWD` | `$HOME` | default working directory (unset = a fresh machine's default) |
 | `DSH_MOBILE_REPO` / `_REF` | the dsh-mobile repo / `main` | where the plugin is cloned from |
+| `DSH_PLUGINS` | `dshmarket,github:notf0und/dsh-opencode-sounds` | comma-separated pnpm specs installed into the profile (`none` installs none) |
 | `AUTH_MIDDLEWARE` | `authentik@docker` | the route's middleware; `setup.sh` writes `no-auth@docker` here when single sign-on is opted out of |
 
 ### Always the newest release

@@ -108,6 +108,8 @@ load_settings() {
   DSH_HOME=$(setting DSH_HOME "${DSH_HOME:-$HOME/.dsh}")
   DSH_MOBILE_REPO=$(setting DSH_MOBILE_REPO "")
   DSH_MOBILE_REF=$(setting DSH_MOBILE_REF "main")
+  # Plugins installed into the profile by default, comma-separated pnpm specs.
+  DSH_PLUGINS=$(setting DSH_PLUGINS "dshmarket,github:notf0und/dsh-opencode-sounds")
   # authentik unless setup.sh said otherwise; the environment wins so the hook
   # passes it through, and the default keeps a standalone run working.
   AUTH_MIDDLEWARE=$(setting AUTH_MIDDLEWARE "${AUTH_MIDDLEWARE:-authentik@docker}")
@@ -118,6 +120,9 @@ load_settings() {
   UNIT_DIR="$HOME/.config/systemd/user"
   UNIT="$UNIT_DIR/dsh-web.service"
   ROUTE="$REPO_DIR/traefik/config/certificates/dsh.yml"
+  # The profile tools (`dsh plugin`, the bootstrap above) resolve the harness
+  # home from the environment, so keep it in step with the unit we render.
+  export DSH_HOME
 }
 load_settings
 
@@ -331,6 +336,55 @@ if [ -n "$DSH_MOBILE_REPO" ]; then
   fi
 else
   warn "DSH_MOBILE_REPO is empty in dsh/.env — installing without the mobile plugin"
+fi
+
+# --- the plugins installed by default ----------------------------------------
+# `dsh plugin add` is the supported way in: it forwards to pnpm in the profile
+# and then reconciles `dsh.profile.bundles` against what is installed, which is
+# what makes a package a profile layer. Nothing is vendored here — the specs are
+# just references (an npm name, or a git URL). dsh-mobile above is the
+# exception: it ships its own installer and is vendored into the profile.
+#
+# A plugin already named in the profile is left alone, so the market's own
+# update button owns its version from then on.
+plugin_name() {
+  local spec=$1 base rest
+  case "$spec" in
+    @*/*)
+      # @scope/name, or @scope/name@version — the name ends at a second '@'.
+      rest=${spec#@}
+      if [[ "$rest" == *@* ]]; then printf '@%s' "${rest%@*}"; else printf '%s' "$spec"; fi
+      ;;
+    github:*|git+*|git:*|http://*|https://*|file:*|/*|./*|../*)
+      # A git/github/url/path spec installs under the package directory's own
+      # name: its last path segment, without a .git suffix or #ref.
+      base=${spec##*/}
+      base=${base%.git}
+      base=${base%%#*}
+      printf '%s' "$base"
+      ;;
+    *) printf '%s' "${spec%%@*}" ;;
+  esac
+}
+
+if [ -n "$DSH_PLUGINS" ] && [ "$DSH_PLUGINS" != none ]; then
+  printf '%s\n' "$DSH_PLUGINS" | tr ',' '\n' | while IFS= read -r spec; do
+    spec=$(printf '%s' "$spec" | tr -d '[:space:]')
+    [ -n "$spec" ] || continue
+    name=$(plugin_name "$spec")
+    if [ -n "$name" ] && grep -qF "\"$name\":" "$PROFILE_DIR/package.json" 2>/dev/null; then
+      note "plugin: $name is already in the profile"
+      continue
+    fi
+    note "plugin: adding $spec"
+    if npx -y "@deepseek-ai/dsh@latest" plugin --profile "$DSH_PROFILE" add "$spec"; then
+      note "plugin: $name added — it loads on the restart below"
+    else
+      warn "plugin: could not add $spec — add it from the market instead"
+    fi
+  done
+else
+  note "plugins: none configured (DSH_PLUGINS is empty or 'none')"
 fi
 
 # --- the systemd user service -----------------------------------------------
