@@ -114,6 +114,7 @@ pocket-tts2/config/voices/*
 **/config/zigbee2mqtt/*
 **/config/esphome/*
 **/config/voicebm/*
+smarthome/config/
 smarthome/cache/
 
 # iptv: threadfin's playlists and buffer, the WARP registration, and
