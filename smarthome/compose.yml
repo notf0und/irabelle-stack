@@ -100,7 +100,7 @@ services:
       - sh
       - -c
       - >-
-        mosquitto_passwd -b -c /mosquitto/data/passwd "$$MQTT_USER" "$$MQTT_PASSWORD" &&
+        mosquitto_passwd -b /mosquitto/data/passwd "$$MQTT_USER" "$$MQTT_PASSWORD" &&
         chmod 0700 /mosquitto/data/passwd &&
         exec mosquitto -c /mosquitto/config/mosquitto.conf
     volumes:

@@ -653,6 +653,20 @@ else
   warn "Install it once with: sudo apt install acl — then re-run this."
 fi
 
+# --- per-stack setup hooks ---------------------------------------------------
+# Some stacks need to generate passwords or do one-time work the first time
+# they are seen.  We look for a setup.sh (or scripts/setup.sh) inside each
+# stack directory and source it if present.  The hook is responsible for being
+# idempotent.
+for s in "${STACKS[@]}"; do
+  for hook in "$s/setup.sh" "$s/scripts/setup.sh"; do
+    if [ -x "$hook" ]; then
+      note "running $hook"
+      ( cd "$s" && "$hook" ) || warn "$hook failed"
+    fi
+  done
+done
+
 # Anything already root-owned in here came from a container start before this
 # script did that, and it will block `rm -rf` of the checkout.
 if find "$REPO_DIR" -path "$REPO_DIR/.git" -prune -o -user root -print -quit 2>/dev/null | grep -q .; then
