@@ -426,17 +426,39 @@ if [ -f "$DNSMASQ_CONF" ] && [ -n "$ROOT_TLD" ]; then
 fi
 
 # Zigbee2MQTT only starts with a coordinator to talk to (it is behind the
-# `zigbee` compose profile). Look for one once, by its stable by-id name, and
-# switch the profile on in smarthome/.env when there is. A path you set
-# yourself is left alone.
-if [ -f smarthome/.env ] && [ -z "$(env_var smarthome/.env ZIGBEE_DEVICE)" ]; then
-  zb=$(ls /dev/serial/by-id/ 2>/dev/null \
-       | grep -iE 'zigbee|sonoff|cc26|cc13|slzb|conbee|zbdongle|ezsp|efr32|skyconnect|home_assistant_connect' \
-       | head -n1 || true)
-  if [ -n "$zb" ]; then
-    sed -i -e "s|^ZIGBEE_DEVICE=.*|ZIGBEE_DEVICE=/dev/serial/by-id/$zb|" \
-           -e "s|^COMPOSE_PROFILES=.*|COMPOSE_PROFILES=zigbee|" smarthome/.env
-    note "smarthome/.env: Zigbee coordinator found ($zb) — Zigbee2MQTT will start"
+# `zigbee` compose profile). We auto-detect a dongle by its stable by-id name
+# unless the user explicitly passed --no-zigbee. We also re-detect if the
+# currently configured device has disappeared (dongle moved to another port).
+zigbee_wanted=true
+case "${1:-}" in
+  --no-zigbee) zigbee_wanted=false ;;
+  --zigbee)    zigbee_wanted=true ;;
+esac
+
+if [ "$zigbee_wanted" = true ] && [ -f smarthome/.env ]; then
+  current=$(env_var smarthome/.env ZIGBEE_DEVICE)
+  need_detect=false
+
+  if [ -z "$current" ]; then
+    need_detect=true
+  elif [ ! -e "$current" ]; then
+    # Previously configured dongle is gone — try to find a new one
+    need_detect=true
+    note "smarthome/.env: previous Zigbee device $current no longer exists — re-detecting"
+  fi
+
+  if [ "$need_detect" = true ]; then
+    zb=$(ls /dev/serial/by-id/ 2>/dev/null \
+         | grep -iE 'zigbee|sonoff|cc26|cc13|slzb|conbee|zbdongle|ezsp|efr32|skyconnect|home_assistant_connect' \
+         | head -n1 || true)
+    if [ -n "$zb" ]; then
+      sed -i -e "s|^ZIGBEE_DEVICE=.*|ZIGBEE_DEVICE=/dev/serial/by-id/$zb|" \
+             -e "s|^COMPOSE_PROFILES=.*|COMPOSE_PROFILES=zigbee|" smarthome/.env
+      note "smarthome/.env: Zigbee coordinator found ($zb) — Zigbee2MQTT will start"
+    else
+      # No dongle found this time — make sure the profile stays off
+      sed -i "s|^COMPOSE_PROFILES=.*|COMPOSE_PROFILES=|" smarthome/.env 2>/dev/null || true
+    fi
   fi
 fi
 
