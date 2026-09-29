@@ -472,6 +472,10 @@ else
   note "created app-bridge"
 fi
 
+# Fix ownership of all stack config/ directories so containers running as
+# PUID:PGID can write runtime files (mosquitto passwd, esphome secrets.yaml, …).
+fix_stack_config_ownership
+
 # Pi-hole's web UI has no password — authentik in front of it is the login —
 # so its web server only lets in app-bridge, where Traefik is (see
 # adblock/compose.yml). app-bridge's subnet is whatever Docker handed out when

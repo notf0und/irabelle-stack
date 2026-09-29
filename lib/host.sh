@@ -46,6 +46,19 @@ host_env_set() {
   fi
 }
 
+# Ensure every stack's config/ directory is owned by the container user
+# (PUID:PGID). This is required for services that write at runtime
+# (mosquitto passwd file, esphome secrets.yaml, mariadb data, …).
+# Idempotent and safe to run even if the directories do not exist.
+fix_stack_config_ownership() {
+  local uid="${PUID:-1000}"
+  local gid="${PGID:-1000}"
+  for d in */config/; do
+    [ -d "$d" ] || continue
+    chown -R "$uid:$gid" "$d" 2>/dev/null || true
+  done
+}
+
 # True when a stack already has a running container. setup.sh and the hooks use
 # this to leave a stack that is already up exactly as it is — no `up -d` (which
 # can recreate a container when the compose file changed) and no pull. Applying

@@ -48,6 +48,9 @@ else
   REPO_DIR=$PWD
 fi
 
+# Shared helpers (host_env_get/set, fix_stack_config_ownership, …)
+. "$REPO_DIR/lib/host.sh"
+
 DRY_RUN=0
 DO_PULL=1
 DO_DEPLOY=0
@@ -157,6 +160,11 @@ if [ "$DRY_RUN" = 0 ]; then
     exit 0
   fi
 fi
+
+# Fix ownership of all stack config/ directories so containers running as
+# PUID:PGID can write runtime files (mosquitto passwd, esphome secrets.yaml, …).
+# This also covers newly adopted stacks.
+fix_stack_config_ownership
 
 # --- wire deployed apps together -----------------------------------------------
 # The media stacks are deployed from Dockhand, whenever you choose to, so this
