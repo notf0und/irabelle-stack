@@ -166,6 +166,11 @@ fi
 # This also covers newly adopted stacks.
 fix_stack_config_ownership
 
+# Rebuild anything stuck in a restart loop. A running stack is otherwise left
+# alone on purpose, so this is what lets a fixed command or env var take effect
+# on the next run, without a manual redeploy.
+recreate_restarting_containers
+
 # --- wire deployed apps together -----------------------------------------------
 # The media stacks are deployed from Dockhand, whenever you choose to, so this
 # is where they get connected to each other and to authentik afterwards:

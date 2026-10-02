@@ -839,6 +839,13 @@ for s in "${STACKS[@]}"; do
   note "$s: not started — deploy it from Dockhand (it is adopted there below)"
 done
 
+# A stack that is already up is left alone, so a fixed compose file does not
+# take effect on its own. Anything stuck in a restart loop is exception enough:
+# it is already broken, so rebuild it here — that is what makes a change take
+# effect on the next ./setup.sh without a manual redeploy.
+say "Restart-looping containers"
+recreate_restarting_containers
+
 # --- hand the host's DNS back to the router ----------------------------------
 # Bootstrapping a cold host needs *some* DNS before Pi-hole is up at all — the
 # git clone and docker pull this repo itself needs. manual-dns.sh (kept in the

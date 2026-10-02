@@ -59,6 +59,26 @@ fix_stack_config_ownership() {
   done
 }
 
+# Recreate containers that are stuck in a restart loop, from their own compose
+# project. A running stack is deliberately left alone (see stack_is_running),
+# so a compose change — a fixed command, a new env var — otherwise waits for a
+# manual redeploy. A container that is crash-looping is already broken, though,
+# so rebuilding it from its current compose file can only help, and that is what
+# lets a fix take effect on the next ./setup.sh or ./update.sh. Healthy
+# containers are never touched.
+recreate_restarting_containers() {
+  local c svc proj dir
+  for c in $(docker ps --filter status=restarting --format '{{.Names}}' 2>/dev/null); do
+    svc=$(docker inspect "$c" --format '{{index .Config.Labels "com.docker.compose.service"}}' 2>/dev/null)
+    proj=$(docker inspect "$c" --format '{{index .Config.Labels "com.docker.compose.project"}}' 2>/dev/null)
+    dir=$(docker inspect "$c" --format '{{index .Config.Labels "com.docker.compose.project.working_dir"}}' 2>/dev/null)
+    [ -n "$svc" ] && [ -n "$proj" ] && [ -n "$dir" ] && [ -d "$dir" ] || continue
+    note "$c is in a restart loop — recreating it from $dir"
+    ( cd "$dir" && docker compose -p "$proj" up -d --force-recreate "$svc" ) \
+      || echo "could not recreate $c — check: docker logs $c" >&2
+  done
+}
+
 # True when a stack already has a running container. setup.sh and the hooks use
 # this to leave a stack that is already up exactly as it is — no `up -d` (which
 # can recreate a container when the compose file changed) and no pull. Applying
