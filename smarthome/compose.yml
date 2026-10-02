@@ -40,6 +40,14 @@ services:
       # configuration.yaml reads this (`db_url: !env_var RECORDER_DB_URL`, set
       # up by integrations.py), and the start hook waits for it.
       RECORDER_DB_URL: mysql://homeassistant:${HA_DB_PASSWORD:?HA_DB_PASSWORD is unset - run ./setup.sh, or set it in smarthome/.env}@127.0.0.1:${HA_DB_PORT:-3306}/homeassistant?charset=utf8mb4
+      # The start hook installs Traefik's root CA into the system store, but
+      # Python libraries that ship their own bundle (httpx, requests) verify
+      # against certifi and never look at it — the ha-mcp server died with
+      # "unable to get local issuer certificate" for https://homeassistant.$TLD
+      # because of that. Point them at the system bundle, which has our CA.
+      SSL_CERT_FILE: /etc/ssl/certs/ca-certificates.crt
+      REQUESTS_CA_BUNDLE: /etc/ssl/certs/ca-certificates.crt
+      CURL_CA_BUNDLE: /etc/ssl/certs/ca-certificates.crt
     volumes:
       - /etc/localtime:/etc/localtime:ro
       - /run/dbus:/run/dbus:ro
