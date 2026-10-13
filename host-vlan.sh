@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # ---------------------------------------------------------------------------
-# host-vlan.sh — give this host a Docker VLAN uplink, and the macvlan network
-# containers ride on.
+# host-vlan.sh — give this host the Docker VLAN the macvlan network rides on.
+#
+# The VLAN is not an egress path. It exists so Pi-hole can hold its own address
+# (and therefore its own port 53); the host and every container keep egressing
+# through the LAN. See NETWORK.md §1.
 #
 #   sudo ./host-vlan.sh              create/refresh the VLAN and the network
 #   sudo ./host-vlan.sh --try        same, but `netplan try` (auto-rolls back
@@ -103,15 +106,12 @@ DOCKER_VLAN_ADDRESS=${DOCKER_VLAN_ADDRESS:-192.168.${DOCKER_VLAN_ID}.2/24}
 DOCKER_VLAN_GATEWAY=${DOCKER_VLAN_GATEWAY:-192.168.${DOCKER_VLAN_ID}.1}
 DOCKER_VLAN_SUBNET=${DOCKER_VLAN_SUBNET:-192.168.${DOCKER_VLAN_ID}.0/24}
 DOCKER_MACVLAN_NETWORK=${DOCKER_MACVLAN_NETWORK:-app-macvlan}
-KEEP_LAN_DEFAULT_ROUTE=${KEEP_LAN_DEFAULT_ROUTE:-0}
 
 # Which NIC carries the VLAN.
 #
-# "The interface on the default route" is only a safe answer the *first* time:
-# once this script has run, the VLAN's own static default route (metric 50)
-# wins, so the default route points at the VLAN itself. Asking an existing VLAN
-# interface for its parent is authoritative, so try that first and only fall
-# back to the default route when the VLAN does not exist yet.
+# Asking an existing VLAN interface for its parent is authoritative, so try that
+# first. The default route is a safe fallback now that the VLAN carries no
+# default route of its own, but only while the VLAN does not exist yet.
 vlan_parent() {
   ip -o link show "$DOCKER_VLAN_NAME" 2>/dev/null \
     | sed -n 's/.*@\([^:@]*\)[:@].*/\1/p' | head -1
@@ -153,36 +153,26 @@ vlan_iface_ip() { printf '%s' "${DOCKER_VLAN_ADDRESS%%/*}"; }
 netplan_body() {
   cat <<EOF
 # Written by irabelle-stack/host-vlan.sh — edit that script, not this file.
-# The Docker VLAN uplink, mirroring the layout used on \`station\`.
+# The Docker VLAN, mirroring the layout used on \`station\`.
+#
+# The VLAN carries NO default route. Its only job is to give Pi-hole an address
+# of its own — and therefore port 53 of its own — on a segment LAN clients can
+# reach. The host keeps its LAN address *and* its LAN default route, so the host
+# and every bridge container egress through the LAN and land in the router's
+# \`lan\` zone. Macvlan traffic never consults this routing table at all, so none
+# of the above affects Pi-hole.
 network:
   version: 2
   renderer: networkd
   ethernets:
     ${HOST_NIC}:
       dhcp4: true
-EOF
-  if [ "$KEEP_LAN_DEFAULT_ROUTE" != 1 ]; then
-    cat <<EOF
-      dhcp4-overrides:
-        # Keep the LAN address — that is management access and the router's
-        # static lease — but do not accept a default route from the LAN.
-        # Container egress must land in the $DOCKER_VLAN_NAME zone, never in
-        # the lan zone. Set KEEP_LAN_DEFAULT_ROUTE=1 in host.env if you would
-        # rather have a fail-open fallback.
-        use-routes: false
-EOF
-  fi
-  cat <<EOF
   vlans:
     ${DOCKER_VLAN_NAME}:
       id: ${DOCKER_VLAN_ID}
       link: ${HOST_NIC}
       addresses:
         - ${DOCKER_VLAN_ADDRESS}
-      routes:
-        - to: default
-          via: ${DOCKER_VLAN_GATEWAY}
-          metric: 50
 EOF
 }
 
@@ -201,6 +191,9 @@ do_status() {
 
   say "default route"
   ip route show default || true
+
+  say "egress route (host and bridge containers)"
+  ip route get 1.1.1.1 2>/dev/null | sed -n '1p' || note "no route"
 
   say "macvlan network ($DOCKER_MACVLAN_NETWORK)"
   docker network inspect "$DOCKER_MACVLAN_NETWORK" \

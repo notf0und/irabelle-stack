@@ -4,13 +4,18 @@ Two layers, two jobs. They are not alternatives, and neither replaces the other:
 
 | Layer | Answers | Enforced by |
 | --- | --- | --- |
-| Docker VLAN / firewall zone | *Can this reach the internet? Can it reach my LAN?* | the router (fw4) |
+| Firewall zone (fw4) | *Can this reach the internet? Can it reach my LAN?* | the router |
 | Docker network | *Can this container reach that container?* | the host (DOCKER-ISOLATION) |
 
 Keeping them straight matters, because the obvious mistake is expecting a VLAN to
 separate two containers. It cannot: everything behind one host reaches the
 router through **one switch port**, and same-subnet traffic is switched, never
 routed, so fw4 never sees it. A VLAN is a single trust domain.
+
+The host and every container egress through the **LAN**, and therefore sit in the
+router's `lan` zone. The Docker VLAN is not an egress path at all — it exists
+only so Pi-hole can hold an address, and with it port 53, that the host's own
+resolver cannot occupy. See §1.
 
 ## Address plan
 
@@ -21,7 +26,7 @@ Mirrors the layout already running on `station`.
 | Physical NIC | `eno1` | `enp1s0` |
 | LAN (management) | 192.168.1.2 | 192.168.1.2 (static lease) |
 | Docker VLAN interface | `Docker.VLAN`, id **10** | `Docker.Online`, id **40** |
-| Host address on it | 192.168.10.2/24 | 192.168.40.2/24 |
+| Host address on it | 192.168.10.2/24 | 192.168.40.2/24 (macvlan parent; not an egress path) |
 | Router gateway | 192.168.10.1 | 192.168.40.1 |
 | Macvlan network | `app-macvlan` | `app-macvlan` |
 | Pi-hole | 192.168.10.5 | **192.168.40.5** |
@@ -47,18 +52,13 @@ network:
   renderer: networkd
   ethernets:
     enp1s0:
-      dhcp4: true
-      dhcp4-overrides:
-        use-routes: false        # address yes, default route no
+      dhcp4: true                # address AND the LAN default route
   vlans:
     Docker.Online:
       id: 40
       link: enp1s0
       addresses: [192.168.40.2/24]
-      routes:
-        - to: default
-          via: 192.168.40.1
-          metric: 50
+      # no routes: — this interface is a macvlan parent, not an uplink
 ```
 
 ```sh
@@ -67,13 +67,15 @@ docker network create -d macvlan \
   -o parent=Docker.Online app-macvlan
 ```
 
-**Why `use-routes: false`** — this is the load-bearing line. The host keeps its
-LAN address (management, and the router's static lease), but stops accepting a
-default route from the LAN. All egress then has exactly one path: the Docker
-VLAN, which lands in the `dockeron` zone — internet, no LAN. Leave it fail-open
-(`KEEP_LAN_DEFAULT_ROUTE=1` in `host.env`) and a misconfigured trunk silently
-falls back to routing container traffic into the `lan` zone, where it can reach
-everything.
+**Why the VLAN carries no default route.** The VLAN's single job is to give
+Pi-hole an address LAN clients can reach at a fixed point — `192.168.40.5` —
+without fighting the host for port 53. It is deliberately *not* an egress path.
+The host keeps its LAN address and its LAN default route, so the host and every
+bridge container egress through the LAN and land in the router's `lan` zone:
+internet **and** LAN reachability, the same trust level as any other machine on
+the LAN. Macvlan traffic never consults the host's routing table, so Pi-hole is
+unaffected either way. `KEEP_LAN_DEFAULT_ROUTE` used to pick between fail-closed
+and fail-open here; there is nothing left for it to choose, so the flag is gone.
 
 Requirements and checks:
 
@@ -193,10 +195,10 @@ local names stop resolving, check it under Settings → All settings →
 ## 3. Everything else: bridge networks, not macvlan
 
 A bridge container inherits the zone of whatever interface carries the host's
-default route — with `host-vlan.sh` done, that is `dockeron`. So a plain bridge
-container already gets *internet, no LAN*, for free, and keeps Docker's
-per-container isolation, which macvlan throws away (macvlan traffic bypasses the
-host's iptables entirely).
+default route — with `host-vlan.sh` done, that is the LAN interface, so a plain
+bridge container egresses in the `lan` zone: internet *and* LAN reachability. It
+still keeps Docker's per-container isolation, which macvlan throws away (macvlan
+traffic bypasses the host's iptables entirely).
 
 Give each service its own network and let Traefik be the only multi-homed
 container. A star, not a mesh:
@@ -314,6 +316,35 @@ On the client router, after the host side is up:
    uci set firewall.@rule[-1].target='ACCEPT'
    uci commit firewall && /etc/init.d/firewall reload
    ```
+6. **Anything a container must reach in another zone needs a `lan → …` rule now.**
+   Container egress lands in `lan`, so it is the `lan` row of the firewall matrix
+   that applies to it — not `dockeron`, which now only ever describes the VLAN
+   segment Pi-hole sits on. The ESPHome Bluetooth proxy is the worked example: it
+   joins the IoT SSID (`iotoff`, 192.168.3.0/24), so the dashboard needs **both**
+   TCP for the API and **ICMP** for liveness — device status comes from a ping
+   sweep, and a rule with `dest_port` set never matches ICMP, which has no ports:
+   ```sh
+   uci add firewall rule
+   uci set firewall.@rule[-1].name='Allow ESPHome Lan -> iotoff'
+   uci set firewall.@rule[-1].src='lan'
+   uci set firewall.@rule[-1].dest='iotoff'
+   uci set firewall.@rule[-1].proto='tcp'
+   uci set firewall.@rule[-1].dest_port='3232 5053 6053 6063 8765 32774'
+   uci set firewall.@rule[-1].target='ACCEPT'
+
+   uci add firewall rule
+   uci set firewall.@rule[-1].name='Allow-Ping Lan -> iotoff'
+   uci set firewall.@rule[-1].src='lan'
+   uci set firewall.@rule[-1].dest='iotoff'
+   uci set firewall.@rule[-1].proto='icmp'
+   uci set firewall.@rule[-1].icmp_type='echo-request'
+   uci set firewall.@rule[-1].family='ipv4'
+   uci set firewall.@rule[-1].target='ACCEPT'
+
+   uci commit firewall && /etc/init.d/firewall reload
+   ```
+   The reverse direction (`iotoff → lan`) is only needed if the device initiates;
+   replies to both of the above ride conntrack.
 
 ## 5. Gotchas worth remembering
 
