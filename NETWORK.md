@@ -361,6 +361,14 @@ On the client router, after the host side is up:
   home switch reflects the frame back out the port it came in on; the MT6000
   does not. Never assume it works — test it, and give any container that needs
   on-host access a bridge network too.
+- **Anything that must *receive* mDNS has to run on the host network.** A bridge
+  container has its own network namespace, so multicast reflected onto the LAN
+  never reaches it: the host *routes* between `enp1s0` and `br-*`, it does not
+  bridge them. The ESPHome dashboard is the worked example — on `app-bridge` it
+  reached the device over the API but saw no mDNS, so MAC, ESPHome version and
+  config hash stayed stale. On `network_mode: host` it binds every host
+  interface and reads them fine. The cost is real: that dashboard has no login,
+  so it answers on `192.168.1.2:6052` for the whole LAN, not only via Traefik.
 - **An external network needs a declared `driver:`.** `docker compose config`
   emits nothing for an external network without one, and `setup.sh` will refuse
   rather than guess — guessing "bridge" is how a macvlan network gets created
