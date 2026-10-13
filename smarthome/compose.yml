@@ -173,6 +173,21 @@ services:
     image: ghcr.io/esphome/esphome:latest
     container_name: esphome
     user: "${PUID:-1000}:${PGID:-1000}"
+    # The entrypoint special-cases "dashboard" and execs
+    # `esphome-device-builder "$@"`, so these flags pass straight through.
+    # Bind to docker0's address: Traefik reaches host-network services there,
+    # and the LAN cannot route to it — the same convention as
+    # VOICEBM_DASHBOARD_HOST. Without it this no-login dashboard would answer
+    # on 192.168.1.2:6052 for the whole LAN, bypassing Traefik and Authentik.
+    command: ["dashboard", "--host", "172.17.0.1", "/config"]
+    # The image's own healthcheck probes http://localhost:6052/version, which
+    # is no longer bound now that --host pins the dashboard to docker0. Without
+    # this override the container reports unhealthy, and Traefik filters
+    # unhealthy containers — esphome.$TLD would answer 404.
+    healthcheck:
+      test: ["CMD-SHELL", "curl --fail http://172.17.0.1:6052/version -A 'HealthCheck' || exit 1"]
+      interval: 30s
+      timeout: 30s
     environment:
       TZ: ${TZ:-Pacific/Auckland}
       HOME: /cache
@@ -186,10 +201,8 @@ services:
     # On the host network, like homeassistant and voicebm. The dashboard reads
     # device metadata — MAC, ESPHome version, config hash — from mDNS, and that
     # needs the host's own interfaces: a bridge container has its own network
-    # namespace and never sees multicast reflected onto the LAN. See NETWORK.md
-    # §3. The trade-off is that the dashboard has no login of its own, so it is
-    # reachable directly at :6052 on every host address, not only through
-    # Traefik — which is why it lived on app-bridge before.
+    # namespace and never sees multicast reflected onto the LAN. The mDNS bind
+    # is independent of the --host above, so it keeps working. See NETWORK.md §3.
     network_mode: host
     labels:
       traefik.enable: true

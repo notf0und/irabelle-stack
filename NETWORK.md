@@ -367,8 +367,16 @@ On the client router, after the host side is up:
   bridge them. The ESPHome dashboard is the worked example — on `app-bridge` it
   reached the device over the API but saw no mDNS, so MAC, ESPHome version and
   config hash stayed stale. On `network_mode: host` it binds every host
-  interface and reads them fine. The cost is real: that dashboard has no login,
-  so it answers on `192.168.1.2:6052` for the whole LAN, not only via Traefik.
+  interface and reads them fine.
+- **A host-network service does not have to be *exposed* to the LAN.** mDNS
+  binds every interface regardless of where the HTTP server listens, so a
+  no-login dashboard can stay off the LAN: bind it to docker0's address
+  (`172.17.0.1`), which Traefik dials host-network backends on and the LAN
+  cannot route to — the same convention as `VOICEBM_DASHBOARD_HOST`. Two traps.
+  The image's own healthcheck probes `localhost`, so it must be overridden to
+  match the new bind. And **Traefik filters unhealthy containers**, so a broken
+  healthcheck surfaces as a **404 on `.$TLD`**, not a 502 — which reads like
+  routing, not health, and sends you looking in the wrong place.
 - **An external network needs a declared `driver:`.** `docker compose config`
   emits nothing for an external network without one, and `setup.sh` will refuse
   rather than guess — guessing "bridge" is how a macvlan network gets created
