@@ -824,6 +824,14 @@ it too, within 12 hours):
   first-run wizard), tells it to trust Traefik's forwarded headers (without that
   `homeassistant.<TLD>` answers 400), points its history at the stack's MariaDB,
   and connects its MQTT integration to Mosquitto.
+* **The history database follows `mariadb:latest`** — the tag is not pinned, so
+  a restart can land on a new major release (12.2 → 13.0). The start hook
+  (`smarthome/scripts/mariadb-entrypoint.sh`) drops the legacy `tc.log` that an
+  older server leaves behind (a new one aborts on it with "Bad magic header in
+  tc log", which looks like a restart loop) and `MARIADB_AUTO_UPGRADE` upgrades
+  the system tables on that first start. Binary logging is off here, so nothing
+  in `tc.log` is needed; copy `smarthome/config/homeassistant-db/` first if you
+  want to be able to roll a major jump back.
 * **MQTT has a real login**, generated into `smarthome/.env` (`MQTT_USER`,
   `MQTT_PASSWORD`) and applied at every start. Give your devices the same, and
   this host's address on port 1883.

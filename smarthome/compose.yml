@@ -73,7 +73,10 @@ services:
     restart: unless-stopped
 
   homeassistant-db:
-    image: mariadb:11
+    # Follows MariaDB's latest release. The start hook and MARIADB_AUTO_UPGRADE
+    # below turn a major bump (12.2 -> 13.0, ...) into an upgrade rather than a
+    # restart loop.
+    image: mariadb:latest
     container_name: homeassistant-db
     # As you: the database lives in this checkout (or on the fast disk).
     user: "${PUID:-1000}:${PGID:-1000}"
@@ -82,8 +85,14 @@ services:
       MARIADB_USER: homeassistant
       MARIADB_PASSWORD: ${HA_DB_PASSWORD:?HA_DB_PASSWORD is unset - run ./setup.sh, or set it in smarthome/.env}
       MARIADB_ROOT_PASSWORD: ${HA_DB_ROOT_PASSWORD:?HA_DB_ROOT_PASSWORD is unset - run ./setup.sh, or set it in smarthome/.env}
+      # Run mariadb-upgrade on start when the image's major version changed.
+      MARIADB_AUTO_UPGRADE: "1"
     volumes:
       - ./config/homeassistant-db:/var/lib/mysql
+      - ./scripts/mariadb-entrypoint.sh:/irabelle-mariadb-entrypoint.sh:ro
+    # Drops a tc.log left behind by an older major, which would otherwise abort
+    # the new server with "Bad magic header in tc log". Binary logging is off.
+    entrypoint: ["/irabelle-mariadb-entrypoint.sh"]
     # For Home Assistant on the host network — this host only, never the LAN.
     ports:
       - "127.0.0.1:${HA_DB_PORT:-3306}:3306"
