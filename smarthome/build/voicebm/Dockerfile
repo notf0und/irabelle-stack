@@ -62,8 +62,8 @@ COPY config_generator.py /app/config_generator.py
 COPY config.json.sample /app/config.json.sample
 COPY entrypoint.sh /app/entrypoint.sh
 # The OpenAI-compatible transcription API and the script that starts it next
-# to VoiceBM. On station these lived in the data directory; baked in here, so
-# /data is only data.
+# to VoiceBM. Baked in here (they used to live in config/voicebm, mounted at
+# /data), so /data is only data.
 COPY openai_api.py /app/openai_api.py
 COPY start_services.sh /app/start_services.sh
 RUN chmod +x /app/entrypoint.sh /app/config_generator.py /app/start_services.sh
