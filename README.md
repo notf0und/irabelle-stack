@@ -95,7 +95,7 @@ want and ignore the rest.
 │   │                                # ESPHome, VoiceBM
 │   ├── .env.example                 # generated passwords, HOST_IP, Zigbee dongle
 │   ├── mosquitto.conf               # MQTT broker config (login from .env)
-│   ├── scripts/homeassistant-entrypoint.sh   # trust our CA, wait for the DB
+│   ├── scripts/homeassistant-entrypoint.sh   # trust our CA, wait for the DB and resolver
 │   └── build/voicebm/               # built here, not pulled
 ├── iptv/
 │   ├── compose.yml                  # Threadfin, streamlink, Cloudflare WARP
@@ -832,6 +832,14 @@ it too, within 12 hours):
   the system tables on that first start. Binary logging is off here, so nothing
   in `tc.log` is needed; copy `smarthome/config/homeassistant-db/` first if you
   want to be able to roll a major jump back.
+* **The Home Assistant start hook waits before handing over to `/init`** — for
+  the recorder database (so the recorder does not burn its retries on a boot
+  race) and for the local resolver, after which it probes PyPI once for the
+  `ha-mcp` package. The resolver probe uses `homeassistant.<TLD>`, which
+  answers from pihole's wildcard without the WAN, so an internet outage delays
+  Home Assistant by seconds instead of the `PACKAGE_INDEX_WAIT_SECONDS`
+  timeout (300 s, `0` disables). Home Assistant starts even if PyPI never
+  answers.
 * **MQTT has a real login**, generated into `smarthome/.env` (`MQTT_USER`,
   `MQTT_PASSWORD`) and applied at every start. Give your devices the same, and
   this host's address on port 1883.

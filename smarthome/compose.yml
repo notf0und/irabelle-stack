@@ -48,6 +48,10 @@ services:
       SSL_CERT_FILE: /etc/ssl/certs/ca-certificates.crt
       REQUESTS_CA_BUNDLE: /etc/ssl/certs/ca-certificates.crt
       CURL_CA_BUNDLE: /etc/ssl/certs/ca-certificates.crt
+      # The start hook waits until the resolver answers this name (the wildcard
+      # record makes it WAN-independent) before probing PyPI for ha-mcp. See
+      # scripts/homeassistant-entrypoint.sh.
+      PACKAGE_INDEX_LOCAL_NAME: homeassistant.${TLD:?TLD is not set in .env (see .env.example)}
     volumes:
       - /etc/localtime:/etc/localtime:ro
       - /run/dbus:/run/dbus:ro

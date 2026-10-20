@@ -5,7 +5,7 @@
 # 1. Trust our root CA, mounted into /usr/local/share/ca-certificates: HA's
 #    Python then verifies https://*.$TLD services (authentik, Plex, ...).
 # 2. Wait for the recorder database — see below.
-# 3. Wait for the Python package index (DNS) — see below.
+# 3. Wait for the local resolver, then probe PyPI — see below.
 
 update-ca-certificates >/dev/null 2>&1 && echo "✅ Updated CA certificates"
 
@@ -88,7 +88,7 @@ while True:
 PY
 fi
 
-# --- Wait for the Python package index before starting Home Assistant --------
+# --- Wait for the local resolver, then probe the index once ------------------
 # The HA-MCP integration's in-process server force-installs the `ha-mcp` Python
 # package on every start while its channel auto-update is on, so it needs PyPI
 # during bring-up. On a host reboot / docker daemon restart the daemon starts
@@ -99,53 +99,89 @@ fi
 # 7.10.0 ... and Home Assistant 2026.8.0 ...", both of which were satisfied);
 # because logger.yaml sets `default: critical`, the true uv error — "Failed to
 # fetch: https://pypi.org/simple/ha-mcp/" — was never logged (happened on the
-# reference server, 2026-10-13). Block here until the index answers so the
-# installer never races the resolver.
+# reference server, 2026-10-13).
 #
-# Any HTTP response counts as reachable, 4xx included: this probes the
-# DNS/TCP/TLS path, not what the index serves.
+# Only the resolver is worth waiting for: that is what the boot race takes
+# away. Wait until a name the resolver serves itself answers — no WAN needed,
+# so an internet outage does not become a long wait — then probe the index
+# exactly once. If the index is still unreachable when the resolver answers,
+# the WAN or the index is down: waiting cannot fix that, and holding the
+# house's automations for the timeout would not either. Any HTTP response
+# counts as reachable, 4xx included: this probes the DNS/TCP/TLS path, not what
+# the index serves.
 #
 # Tunables:
-#   PACKAGE_INDEX_WAIT_SECONDS  max seconds to wait (default 300; 0 = skip)
-#   PACKAGE_INDEX_URL           URL probed (default https://pypi.org/simple/)
-# If the index never answers we still start HA (the integration files a repair
-# issue and a reload retries) rather than leaving the house without automations.
+#   PACKAGE_INDEX_WAIT_SECONDS  max seconds to wait for the resolver (default
+#                               300; 0 = skip both steps)
+#   PACKAGE_INDEX_LOCAL_NAME    a name the resolver answers itself; compose
+#                               sets it to homeassistant.$TLD. Unset = no wait
+#   PACKAGE_INDEX_URL           index probed once (default https://pypi.org/simple/)
+# If neither answers we still start HA (the integration files a repair issue
+# and a reload retries) rather than leaving the house without automations.
 if [ "${PACKAGE_INDEX_WAIT_SECONDS:-300}" != "0" ]; then
-  echo "⏳ Waiting for the Python package index..."
+  echo "⏳ Waiting for the local resolver..."
   PACKAGE_INDEX_URL="${PACKAGE_INDEX_URL:-https://pypi.org/simple/}" \
+  PACKAGE_INDEX_LOCAL_NAME="${PACKAGE_INDEX_LOCAL_NAME:-}" \
   PACKAGE_INDEX_WAIT_SECONDS="${PACKAGE_INDEX_WAIT_SECONDS:-300}" \
   python3 - <<'PY'
 import os
+import socket
 import time
 import urllib.error
 import urllib.request
 
 url = os.environ.get("PACKAGE_INDEX_URL", "https://pypi.org/simple/")
+local = os.environ.get("PACKAGE_INDEX_LOCAL_NAME", "").strip()
 timeout = int(os.environ.get("PACKAGE_INDEX_WAIT_SECONDS", "300"))
 interval = 5
-print(f"   target {url}, timeout {timeout}s")
 
-deadline = time.monotonic() + timeout
-attempt = 0
-while True:
-    attempt += 1
-    try:
-        with urllib.request.urlopen(url, timeout=10) as resp:
-            resp.read(1)  # touch the body: a stalled transfer is not "ready"
-        print(f"✅ Package index reachable after {attempt} attempt(s)")
-        break
-    except urllib.error.HTTPError as exc:
-        # The server answered, so DNS/TCP/TLS all work; the status code is
-        # irrelevant to whether the installer can fetch from the index.
-        print(f"✅ Package index reachable after {attempt} attempt(s) (HTTP {exc.code})")
-        break
-    except Exception as exc:
-        if time.monotonic() >= deadline:
-            print(f"⚠️  Package index still unreachable after {timeout}s: {exc}")
-            print("⚠️  Starting Home Assistant anyway; retry via the integration reload")
+# Phase 1: the resolver the installer raced. A name it serves itself answers
+# without the WAN, so this waits for the resolver, not for the internet.
+if not local:
+    print("   PACKAGE_INDEX_LOCAL_NAME unset; not waiting for the resolver")
+else:
+    print(f"   resolver target {local}, timeout {timeout}s")
+    deadline = time.monotonic() + timeout
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            socket.getaddrinfo(local, None)
+            print(f"✅ Resolver ready after {attempt} attempt(s)")
             break
-        print(f"… index not ready (attempt {attempt}): {type(exc).__name__}, retrying in {interval}s")
-        time.sleep(interval)
+        except socket.gaierror as exc:
+            # NXDOMAIN still means the resolver answered: it is up, the name
+            # just has no record. Only temporary failures mean "not ready".
+            if exc.errno == getattr(socket, "EAI_NONAME", -2):
+                print("✅ Resolver answered (name has no record); treating it as ready")
+                break
+            if time.monotonic() >= deadline:
+                print(f"⚠️  Resolver still not answering after {timeout}s: {exc}")
+                print("⚠️  Starting Home Assistant anyway")
+                raise SystemExit(0)
+            print(f"… resolver not ready (attempt {attempt}): {type(exc).__name__}, retrying in {interval}s")
+            time.sleep(interval)
+        except OSError as exc:
+            if time.monotonic() >= deadline:
+                print(f"⚠️  Resolver still not answering after {timeout}s: {exc}")
+                print("⚠️  Starting Home Assistant anyway")
+                raise SystemExit(0)
+            print(f"… resolver not ready (attempt {attempt}): {type(exc).__name__}, retrying in {interval}s")
+            time.sleep(interval)
+
+# Phase 2: one probe. The resolver answers now, so a failure here means the
+# WAN or the index is down; waiting would only delay Home Assistant.
+try:
+    with urllib.request.urlopen(url, timeout=10) as resp:
+        resp.read(1)  # touch the body: a stalled transfer is not "ready"
+    print("✅ Package index reachable")
+except urllib.error.HTTPError as exc:
+    # The server answered, so DNS/TCP/TLS all work; the status code is
+    # irrelevant to whether the installer can fetch from the index.
+    print(f"✅ Package index reachable (HTTP {exc.code})")
+except Exception as exc:
+    print(f"⚠️  Package index unreachable while the resolver is up: {type(exc).__name__}")
+    print("⚠️  Starting Home Assistant anyway; retry via the integration reload")
 PY
 fi
 
