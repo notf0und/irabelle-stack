@@ -72,6 +72,7 @@ MQTT_USER              = os.getenv("MQTT_USER", "")
 MQTT_PASS              = os.getenv("MQTT_PASS", "")
 SHARED_AUDIO_DIR       = os.getenv("SHARED_AUDIO_DIR", "/data/stt_requests")
 SETTINGS_FILE          = "/data/meta/settings.json"
+ACTIVE_STATE_FILE      = "/data/meta/active_state.json"
 THRESHOLD_FILE         = "/data/out/thresholds.json"
 ENROLL_DIR             = "/data/enroll"
 PENDING_DIR            = "/data/pending_active"
@@ -112,9 +113,9 @@ MQTT_TOPICS = {
 _STT_ENGINE: Optional[object] = None
 _SPEAKER_EXTRACTOR: Optional[sherpa_onnx.SpeakerEmbeddingExtractor] = None
 _GALLERY: dict = {}          # {(person_id, display_name): centroid_np_array}
+_GALLERY_SIG: tuple = ()     # enroll dir fingerprint the gallery was built from
 _BLOCKED: set = set()        # person_ids on blocklist (populated via MQTT)
 _INJECT_ENABLED: bool = True # inject_identity toggle (from MQTT)
-_PERSON_THRESHOLDS: dict = {}  # per-person threshold overrides
 
 
 # ---------------------------------------------------------------------------
@@ -129,6 +130,7 @@ def load_gallery() -> dict:
         return {}
 
     people: dict = {}
+    counts: dict = {}
     try:
         for person_dir in enroll_path.iterdir():
             if not person_dir.is_dir():
@@ -152,21 +154,53 @@ def load_gallery() -> dict:
             for emb_file in embeddings_dir.glob("*.txt"):
                 try:
                     v = np.loadtxt(emb_file)
-                    if v is not None and len(v) > 0:
-                        vectors.append(v)
+                    norm = np.linalg.norm(v) if v is not None and len(v) > 0 else 0
+                    if norm > 0:
+                        # Normalize so loud/long samples don't dominate the centroid
+                        vectors.append(v / norm)
                 except Exception as exc:
                     _LOGGER.debug("Skip bad embedding %s: %s", emb_file.name, exc)
 
             if vectors:
                 centroid = np.mean(vectors, axis=0)
                 people[(person_id, display_name)] = centroid
+                counts[person_id] = len(vectors)
 
     except Exception as exc:
         _LOGGER.error("Error loading gallery: %s", exc)
         return {}
 
-    _LOGGER.info("Gallery loaded: %d enrolled speakers", len(people))
+    _LOGGER.info(
+        "Gallery loaded: %s",
+        ", ".join(f"{pid}={n}" for pid, n in sorted(counts.items())) or "no enrolled speakers",
+    )
     return people
+
+
+def _gallery_signature() -> tuple:
+    """Cheap fingerprint of /data/enroll (dir mtimes) to detect enroll/remove."""
+    try:
+        sig = []
+        for person_dir in sorted(Path(ENROLL_DIR).iterdir()):
+            emb_dir = person_dir / "embeddings"
+            if emb_dir.is_dir():
+                sig.append((person_dir.name, emb_dir.stat().st_mtime_ns))
+        return tuple(sig)
+    except Exception:
+        return ()
+
+
+def _maybe_reload_gallery() -> None:
+    """Reload the gallery if enrollment data changed on disk.
+
+    Nothing in the container publishes voicebm/gallery/reload, so without this
+    newly enrolled samples were ignored until the proxy restarted.
+    """
+    global _GALLERY, _GALLERY_SIG
+    sig = _gallery_signature()
+    if sig != _GALLERY_SIG:
+        _GALLERY_SIG = sig
+        _GALLERY = load_gallery()
 
 
 def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
@@ -176,15 +210,20 @@ def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.dot(a, b) / (na * nb))
 
 
-def _get_threshold() -> float:
-    """Read MATCH_T_ACTIVE from thresholds.json, fall back to DEFAULT_THRESHOLD."""
+def _get_thresholds() -> tuple:
+    """Read (MATCH_T_ACTIVE, PERSON_OVERRIDES) from thresholds.json — the file
+    the dashboard writes both the global slider and per-person overrides to."""
     try:
         if os.path.exists(THRESHOLD_FILE):
             with open(THRESHOLD_FILE) as f:
-                return float(json.load(f).get("MATCH_T_ACTIVE", DEFAULT_THRESHOLD))
+                data = json.load(f)
+            overrides = data.get("PERSON_OVERRIDES", {})
+            if not isinstance(overrides, dict):
+                overrides = {}
+            return float(data.get("MATCH_T_ACTIVE", DEFAULT_THRESHOLD)), overrides
     except Exception:
         pass
-    return DEFAULT_THRESHOLD
+    return DEFAULT_THRESHOLD, {}
 
 
 def _raw_to_f32(raw: bytes, width: int, channels: int) -> np.ndarray:
@@ -226,13 +265,14 @@ def _identify_speaker_inline(
     Returns (speaker_id, display_name, confidence, inject_enabled, is_blocked, embedding).
     Falls back to ("unknown", "unknown", 0.0, True, False, None) on error.
     """
-    global _GALLERY, _BLOCKED, _INJECT_ENABLED, _PERSON_THRESHOLDS
+    global _GALLERY, _BLOCKED, _INJECT_ENABLED
 
+    _maybe_reload_gallery()
     embedding = _compute_embedding(raw_audio, rate, width, channels)
     if embedding is None:
         return "unknown", "unknown", 0.0, _INJECT_ENABLED, False, None
 
-    threshold = _get_threshold()
+    threshold, overrides = _get_thresholds()
     gallery = _GALLERY  # snapshot reference (safe: dict replaced atomically on reload)
 
     best_sid = None
@@ -246,21 +286,19 @@ def _identify_speaker_inline(
             best_sid = person_id
             best_name = display_name
 
-    # Apply global threshold
+    # Per-person override (set in the dashboard) replaces the global threshold
+    if best_sid and overrides.get(best_sid) is not None:
+        try:
+            threshold = float(overrides[best_sid])
+        except (TypeError, ValueError):
+            pass
+
     if best_sim < threshold:
-        _LOGGER.info("No match (best=%.4f < threshold=%.2f)", best_sim, threshold)
+        _LOGGER.info(
+            "No match (best=%s %.4f < threshold=%.2f)", best_sid, best_sim, threshold
+        )
         best_sid = None
         best_name = None
-
-    # Apply per-person threshold override
-    if best_sid and best_sid in _PERSON_THRESHOLDS:
-        custom = _PERSON_THRESHOLDS[best_sid]
-        if best_sim < custom:
-            _LOGGER.info(
-                "Custom threshold FAILED for %s: %.4f < %.2f", best_sid, best_sim, custom
-            )
-            best_sid = None
-            best_name = None
 
     # Blocklist check (map unknown → "user" virtual ID, same as voicebm_stt_service)
     effective_id = best_sid if best_sid else "user"
@@ -311,11 +349,38 @@ def _make_mqtt_client() -> mqtt.Client:
     return client
 
 
+def _write_active_state(
+    speaker_id: str, display_name: str, confidence: float, decision: str
+) -> None:
+    """Write active_state.json for the dashboard (/api/state/active).
+
+    Upstream only writes this from voicebm_stt_service's MQTT analysis path,
+    which the in-process proxy bypasses, so we write it ourselves.
+    """
+    try:
+        Path(ACTIVE_STATE_FILE).parent.mkdir(parents=True, exist_ok=True)
+        tmp = f"{ACTIVE_STATE_FILE}.tmp"
+        with open(tmp, "w") as f:
+            json.dump({
+                "speaker_id": speaker_id,
+                "display_name": display_name or "user",
+                "confidence": round(confidence, 4),
+                "decision": decision,
+                "timestamp": time.time(),
+                "ts_iso": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            }, f, indent=2)
+        os.replace(tmp, ACTIVE_STATE_FILE)
+    except Exception as exc:
+        _LOGGER.warning("Failed to write active_state.json: %s", exc)
+
+
 def publish_speaker_state(
     speaker_id: str, display_name: str, confidence: float, transcript: str,
     request_id: str
 ) -> None:
     """Publish current speaker + transcript + active identity to MQTT for HA sensors."""
+    decision = "accepted" if speaker_id not in ("unknown", "") else "unknown"
+    _write_active_state(speaker_id, display_name, confidence, decision)
     try:
         client = _make_mqtt_client()
         client.connect(MQTT_BROKER, MQTT_PORT, 60)
@@ -336,7 +401,6 @@ def publish_speaker_state(
             }), qos=1, retain=True)
             client.publish(MQTT_TOPICS["transcript_preferred"], transcript, qos=1, retain=True)
 
-        decision = "accepted" if speaker_id not in ("unknown", "") else "unknown"
         client.publish(MQTT_TOPICS["active_identity"], json.dumps({
             "speaker_id": speaker_id,
             "display_name": display_name if display_name not in ("unknown", "") else "Unknown",
@@ -451,7 +515,11 @@ def _add_to_pending_sync(
                 p = d / f"{removed['id']}{suffix}"
                 p.unlink(missing_ok=True)
 
-        pending_json.write_text(json.dumps(buffer, indent=2))
+        # Atomic replace: the publisher treats an unreadable (half-written)
+        # pending.json as empty and would save [] over it
+        tmp = pending_json.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(buffer, indent=2))
+        os.replace(tmp, pending_json)
         _LOGGER.info("Added to pending buffer: %s (size=%d)", pending_id, len(buffer))
 
         # Publish pending status via MQTT
@@ -650,48 +718,28 @@ class VoiceBMProxyHandler(AsyncEventHandler):
         # Combine audio now (used for both STT and speaker ID)
         raw_audio = b"".join(c.audio for c in self._audio_chunks)
 
-        # If early speaker ID is still running, wait for it (it should be nearly done)
-        # Otherwise run speaker ID fresh on full audio
-        if self._early_speaker_task is not None and not self._early_speaker_task.done():
-            _LOGGER.debug("Waiting for early speaker ID task...")
+        # Full-audio speaker ID runs in parallel with STT: it takes ~30ms vs
+        # ~200ms for STT, so it adds no latency and is far more accurate than
+        # the 1.5s early embedding (genuine sim 0.61 vs 0.46). The result is
+        # published to MQTT before the transcript is returned, so HA always
+        # sees the speaker first.
+        speaker_result, transcript = await asyncio.gather(
+            loop.run_in_executor(
+                None,
+                _identify_speaker_inline,
+                raw_audio, self._rate, self._width, self._channels,
+            ),
+            self._get_embedded_transcript(raw_audio),
+        )
+
+        # Fall back to the early (1.5s) result if full-audio ID failed
+        if speaker_result[5] is None and self._early_speaker_task is not None:
             try:
-                await asyncio.wait_for(self._early_speaker_task, timeout=5.0)
-            except asyncio.TimeoutError:
-                _LOGGER.warning("Early speaker ID timed out, running fresh")
-                self._early_speaker_result = None
-
-        if self._early_speaker_result is not None:
-            # Phase 2: use early result (avoids redundant inference)
-            speaker_result = self._early_speaker_result
-            # Re-run on full audio if utterance is significantly longer than early window
-            # (adds very little overhead — only if there's meaningfully more audio)
-            extra_secs = self._accumulated_audio_secs - EARLY_SPEAKER_ID_SECS
-            if extra_secs > 1.0:
-                _LOGGER.debug(
-                    "Utterance %.1fs, re-running speaker ID on full audio (extra=%.1fs)",
-                    self._accumulated_audio_secs, extra_secs,
-                )
-                speaker_result = await loop.run_in_executor(
-                    None,
-                    _identify_speaker_inline,
-                    raw_audio, self._rate, self._width, self._channels,
-                )
-        else:
-            # No early result — run on full audio now (in parallel with STT)
-            speaker_result = None
-
-        # Run STT and (if needed) speaker ID in parallel
-        if speaker_result is None:
-            speaker_result, transcript = await asyncio.gather(
-                loop.run_in_executor(
-                    None,
-                    _identify_speaker_inline,
-                    raw_audio, self._rate, self._width, self._channels,
-                ),
-                self._get_embedded_transcript(raw_audio),
-            )
-        else:
-            transcript = await self._get_embedded_transcript(raw_audio)
+                await asyncio.wait_for(self._early_speaker_task, timeout=1.0)
+            except Exception:
+                pass
+            if self._early_speaker_result is not None:
+                speaker_result = self._early_speaker_result
 
         speaker_id, display_name, confidence, inject_enabled, is_blocked, embedding = speaker_result
 
@@ -866,7 +914,7 @@ async def main() -> None:
         _LOGGER.warning("Speaker model not found: %s — speaker ID disabled", SHERPA_MODEL)
 
     # Load gallery
-    _GALLERY = load_gallery()
+    _maybe_reload_gallery()
 
     # Start MQTT background listener (blocklist / inject toggle / gallery reload)
     _start_mqtt_listener()

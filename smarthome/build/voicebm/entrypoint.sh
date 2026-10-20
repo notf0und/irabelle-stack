@@ -88,8 +88,10 @@ done
 # ---------------------------------------------------------------------------
 # Start services
 # ---------------------------------------------------------------------------
-echo "[voicebm] Starting voicebm_stt_service..."
-python3 /app/voicebm_stt_service.py &
+# voicebm_stt_service.py is intentionally NOT started: its only unique job was
+# the voicebm/stt/analyze_request speaker-ID path, which the Wyoming proxy now
+# does in-process. Every other handler duplicates voicebm_global_publisher, and
+# running both made them race on pending.json (one reject wiped the buffer).
 
 echo "[voicebm] Starting voicebm_global_publisher..."
 python3 /app/voicebm_global_publisher.py &
