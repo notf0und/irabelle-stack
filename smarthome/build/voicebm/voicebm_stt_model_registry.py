@@ -23,9 +23,10 @@ MODELS = {
         "decoder": "decoder.int8.onnx",
         "tokens": "tokens.txt",
     },
-    "nemo-parakeet-ctc-0.6b": {
-        "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-nemo-parakeet-tdt-ctc-110m-en-2025-01-29.tar.bz2",
-        "dir": "sherpa-onnx-nemo-parakeet-tdt-ctc-110m-en-2025-01-29",
+    # Was mislabelled "-0.6b" (it is the 110M model) and its 2025-01-29 tarball now 404s.
+    "nemo-parakeet-ctc-110m": {
+        "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-nemo-parakeet_tdt_ctc_110m-en-36000-int8.tar.bz2",
+        "dir": "sherpa-onnx-nemo-parakeet_tdt_ctc_110m-en-36000-int8",
         "type": "nemo_ctc",
         "model": "model.int8.onnx",
         "tokens": "tokens.txt",
@@ -54,11 +55,46 @@ MODELS = {
         "joiner": "joiner.int8.onnx",
         "tokens": "tokens.txt",
     },
+    # Multilingual (25 European languages, auto language detection).
+    "parakeet-tdt-0.6b-v3": {
+        "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8.tar.bz2",
+        "dir": "sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8",
+        "type": "transducer",
+        "encoder": "encoder.int8.onnx",
+        "decoder": "decoder.int8.onnx",
+        "joiner": "joiner.int8.onnx",
+        "tokens": "tokens.txt",
+    },
+    # NVIDIA 2026-04 English RNN-T (offline export of the unified offline/streaming model).
+    "parakeet-unified-en-0.6b": {
+        "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-nemo-parakeet-unified-en-0.6b-int8-non-streaming.tar.bz2",
+        "dir": "sherpa-onnx-nemo-parakeet-unified-en-0.6b-int8-non-streaming",
+        "type": "transducer",
+        "encoder": "encoder.int8.onnx",
+        "decoder": "decoder.int8.onnx",
+        "joiner": "joiner.int8.onnx",
+        "tokens": "tokens.txt",
+    },
+    "parakeet-tdt-110m": {
+        "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-nemo-parakeet_tdt_transducer_110m-en-36000-int8.tar.bz2",
+        "dir": "sherpa-onnx-nemo-parakeet_tdt_transducer_110m-en-36000-int8",
+        "type": "transducer",
+        "encoder": "encoder.int8.onnx",
+        "decoder": "decoder.int8.onnx",
+        "joiner": "joiner.int8.onnx",
+        "tokens": "tokens.txt",
+    },
+}
+
+# Old names kept working so existing VOICEBM_STT_MODEL values don't break.
+ALIASES = {
+    "nemo-parakeet-ctc-0.6b": "nemo-parakeet-ctc-110m",
 }
 
 
 def get_model_info(name: str) -> dict:
     """Returns model info dict or raises ValueError."""
+    name = ALIASES.get(name, name)
     if name not in MODELS:
         raise ValueError(f"Unknown model '{name}'. Available: {list(MODELS.keys())}")
     return MODELS[name]
@@ -133,7 +169,7 @@ def create_recognizer(
             joiner=os.path.join(model_dir, info["joiner"]),
             tokens=os.path.join(model_dir, info["tokens"]),
             num_threads=num_threads,
-            model_type="parakeet",
+            model_type="nemo_transducer",
             decoding_method="greedy_search",
         )
 

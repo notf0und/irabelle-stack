@@ -10,10 +10,14 @@ RUN apt-get update && apt-get install -y \
     jq \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Python dependencies (including sherpa-onnx for embedded STT)
+# Install Python dependencies (including sherpa-onnx for embedded STT).
+# sherpa-onnx is pinned so a version bump here invalidates the cached pip layer
+# (an unpinned install never upgrades on rebuild). Check for new releases with:
+#   curl -s https://pypi.org/pypi/sherpa-onnx/json | jq -r .info.version
+ARG SHERPA_ONNX_VERSION=1.13.8
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir \
-        sherpa-onnx \
+        sherpa-onnx==${SHERPA_ONNX_VERSION} \
         paho-mqtt \
         flask \
         flask-cors \
