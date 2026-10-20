@@ -29,7 +29,7 @@ Environment variables:
   POCKET_TTS_HOST          Bind address (default: 0.0.0.0)
   POCKET_TTS_VOICE         Default built-in voice (default: alba)
   POCKET_TTS_ZEROCONF      mDNS service name, empty to disable (default: pocket-tts2)
-  POCKET_TTS_LANGUAGE        Pocket TTS 2.x language model (default: english)
+  POCKET_TTS_LANGUAGE        Pocket TTS language model (default: english)
   HF_HOME                  HuggingFace cache directory (default: /data/models)
   HF_TOKEN                 Optional HuggingFace token for faster downloads
   PREFIX_MIN_DURATION      Min seconds before searching for silence gap (default: 0.15)
@@ -243,14 +243,15 @@ def _trim_leading_silence(audio: np.ndarray, sample_rate: int) -> np.ndarray:
 
 def _load_voice_state(model, language: str, voice_name: str):
     """Load voice state, using safetensors cache for fast subsequent starts."""
-    safetensors_path = VOICES_DIR / f"{voice_name}.safetensors"
+    # Voice states are model-specific: keep one cache dir per language model
+    safetensors_path = VOICES_DIR / language / f"{voice_name}.safetensors"
     if safetensors_path.exists():
         _LOGGER.info("Loading voice %r from safetensors cache", voice_name)
         return model.get_state_for_audio_prompt(str(safetensors_path))
     _LOGGER.info("Loading voice %r from HuggingFace (will cache for next start)...", voice_name)
     # pocket-tts 2.x resolves predefined voice names against the language config
     state = model.get_state_for_audio_prompt(voice_name)
-    VOICES_DIR.mkdir(parents=True, exist_ok=True)
+    safetensors_path.parent.mkdir(parents=True, exist_ok=True)
     from pocket_tts import export_model_state
     export_model_state(state, str(safetensors_path))
     _LOGGER.info("Voice %r cached -> %s", voice_name, safetensors_path)
@@ -515,7 +516,7 @@ async def main():
         tts=[
             TtsProgram(
                 name="pocket-tts2",
-                description="Kyutai Pocket TTS 2.1 - 100M param streaming TTS (~200ms latency)",
+                description="Kyutai Pocket TTS 3.x - 100M param streaming TTS (~150ms latency)",
                 attribution=Attribution(
                     name="Kyutai",
                     url="https://github.com/kyutai-labs/pocket-tts",

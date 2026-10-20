@@ -1,4 +1,4 @@
-# pocket-tts2 — the Pocket TTS 2.1.0 voice server for Home Assistant.
+# pocket-tts2 — the Pocket TTS 3.x voice server for Home Assistant.
 #
 # One service, built here from its own Dockerfile. It speaks two protocols at
 # once:
@@ -22,7 +22,8 @@
 # `ports: ["10215:10215", "10216:10216"]`, and point HA at the host explicitly.
 #
 # Models and voices are downloaded into `config/models` and `config/voices` on
-# first run; both are gitignored.
+# first run; both are gitignored. Voice states are model-specific, so they are
+# cached per language model under `config/voices/<language>/`.
 #
 # `.env` carries TZ and an optional Hugging Face token; see `.env.example`.
 
@@ -44,9 +45,11 @@ services:
       POCKET_TTS_WYOMING_PORT: 10215
       # OpenAI-compatible API port.
       POCKET_TTS_API_PORT: 10216
-      # Language model: english | spanish | spanish_24l | german | italian |
-      # portuguese | french_24l
-      POCKET_TTS_LANGUAGE: english
+      # Language model, pinned because the `english` alias moves between
+      # releases. english_2026-09_2 is the current English default; set
+      # english_2026-04 to get the previous model back. Others: spanish, german,
+      # italian, portuguese, french, dutch, and their *_24l variants.
+      POCKET_TTS_LANGUAGE: english_2026-09_2
       # Default voice; if unset the language's own default is used.
       POCKET_TTS_VOICE: alba
       # mDNS name for Home Assistant auto-discovery. Set it empty to disable.

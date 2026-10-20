@@ -147,7 +147,7 @@ stacks, each deployed the same way — pick it in Dockhand:
 | `plex` | Plex | `plex.$TLD` |
 | `searxng` | SearXNG and its Valkey | `searxng.$TLD` |
 | `n8n` | n8n and its sandboxed code-execution cluster | `n8n.$TLD` |
-| `pocket-tts2` | Pocket TTS 2.1.0 for the Home Assistant voice pipeline | host ports 10215/10216 — see below |
+| `pocket-tts2` | Pocket TTS 3.x (`english_2026-09_2`) for the Home Assistant voice pipeline | host ports 10215/10216 — see below |
 | `smarthome` | Home Assistant and its MariaDB, Mosquitto, Zigbee2MQTT, ESPHome, VoiceBM | `homeassistant.$TLD`, `zigbee2mqtt.$TLD`, `esphome.$TLD`, `voicebm.$TLD` — see [Smart home](#smart-home) |
 | `iptv` | Threadfin (IPTV tuner for Plex), streamlink, Cloudflare WARP | `threadfin.$TLD`; streams on ports 46200-46250 |
 | `monitoring` | Glances | `glances.$TLD` |

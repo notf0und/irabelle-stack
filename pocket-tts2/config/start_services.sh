@@ -1,5 +1,5 @@
 #!/bin/bash
-echo "=== pocket-tts2 (2.1.0) ==="
+echo "=== pocket-tts2 (pocket-tts 3.x) ==="
 echo "  Wyoming  : ${POCKET_TTS_WYOMING_PORT:-10215}"
 echo "  Voice    : ${POCKET_TTS_VOICE:-alba}"
 echo "  Language : ${POCKET_TTS_LANGUAGE:-english}"
