@@ -281,6 +281,14 @@ services:
       traefik.http.routers.voicebm-https.service: voicebm
       traefik.http.routers.voicebm-https.tls: true
       traefik.http.routers.voicebm-https.middlewares: ${AUTH_MIDDLEWARE:-authentik@docker}
+      # The dashboard plays pending/enrolled samples from its own origin; send
+      # those paths to the audio server, behind the same login
+      traefik.http.services.voicebm-audio.loadbalancer.server.port: 9090
+      traefik.http.routers.voicebm-audio-https.rule: Host("voicebm.${TLD:?TLD is not set in .env (see .env.example)}") && (PathPrefix("/pending/") || PathPrefix("/recordings/"))
+      traefik.http.routers.voicebm-audio-https.entrypoints: websecure
+      traefik.http.routers.voicebm-audio-https.service: voicebm-audio
+      traefik.http.routers.voicebm-audio-https.tls: true
+      traefik.http.routers.voicebm-audio-https.middlewares: ${AUTH_MIDDLEWARE:-authentik@docker}
     restart: unless-stopped
 
 networks:

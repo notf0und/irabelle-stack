@@ -54,6 +54,16 @@ RUN grep -q "app.run(host='0.0.0.0', port=5000, debug=True)" /app/voicebm_dashbo
     sed -i "s/app.run(host='0.0.0.0', port=5000, debug=True)/app.run(host=os.environ.get('VOICEBM_DASHBOARD_HOST', '127.0.0.1'), port=int(os.environ.get('VOICEBM_DASHBOARD_PORT', '5000')), debug=False)/" /app/voicebm_dashboard.py && \
     grep -q "VOICEBM_DASHBOARD_HOST" /app/voicebm_dashboard.py
 
+# Pending samples carry an absolute audio_url (http://<host-ip>:9090/...),
+# which Home Assistant also gets over MQTT, so it stays as is. But the
+# dashboard is served over HTTPS (voicebm.$TLD), where browsers upgrade that
+# plain-HTTP audio to https://<host-ip>:9090 and fail the TLS handshake. Play
+# the same path from the dashboard's own origin instead; Traefik routes
+# /pending/ and /recordings/ there to the audio server (compose.yml).
+RUN grep -q "const audio = new Audio(url);" /app/voicebm_dashboard.py && \
+    sed -i "s|const audio = new Audio(url);|const audio = new Audio(new URL(url, location.href).pathname);|" /app/voicebm_dashboard.py && \
+    grep -q "new Audio(new URL(url, location.href).pathname)" /app/voicebm_dashboard.py
+
 # Copy our scripts (built into the image at build time)
 COPY voicebm_wyoming_proxy.py /app/voicebm_wyoming_proxy.py
 COPY voicebm_stt_engine.py /app/voicebm_stt_engine.py
