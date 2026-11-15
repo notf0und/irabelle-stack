@@ -44,6 +44,10 @@ services:
       FTLCONF_misc_etc_dnsmasq_d: "true"
       FTLCONF_webserver_api_password: ""
       FTLCONF_webserver_acl: "-0.0.0.0/0,-[::]/0,+127.0.0.1,+[::1],+${APP_BRIDGE_SUBNET:-127.0.0.1/32}"
+      # Pi-hole only serves its web UI for the Host it knows as its own domain
+      # (403 "Oops! Access denied" for any other name), so it must be the name
+      # Traefik routes to it. The short "pihole" name is redirected to this one.
+      FTLCONF_webserver_domain: pihole.${TLD:?TLD is unset - set it in adblock/.env or in the Dockhand stack environment panel}
     networks:
       app-macvlan:
         ipv4_address: ${PIHOLE_IP:-192.168.40.5}
@@ -56,14 +60,17 @@ services:
       traefik.enable: true
       traefik.http.routers.pihole.rule: Host("pihole") || Host("pihole.${TLD:?TLD is unset - set it in adblock/.env or in the Dockhand stack environment panel}")
       traefik.http.routers.pihole.entrypoints: web
-      traefik.http.routers.pihole.middlewares: pihole-tohttps
+      traefik.http.routers.pihole.middlewares: pihole-canonical,pihole-tohttps
       traefik.http.middlewares.pihole-tohttps.redirectscheme.scheme: https
+      # Short name -> full name (Pi-hole only accepts FTLCONF_webserver_domain).
+      traefik.http.middlewares.pihole-canonical.redirectregex.regex: ^https?://pihole(:[0-9]+)?(/.*)?$$
+      traefik.http.middlewares.pihole-canonical.redirectregex.replacement: https://pihole.${TLD:?TLD is unset - set it in adblock/.env or in the Dockhand stack environment panel}$${2}
       traefik.http.services.pihole.loadbalancer.server.port: 80
 
       traefik.http.routers.pihole-https.rule: Host("pihole") || Host("pihole.${TLD:?TLD is unset - set it in adblock/.env or in the Dockhand stack environment panel}")
       traefik.http.routers.pihole-https.entrypoints: websecure
       traefik.http.routers.pihole-https.tls: true
-      traefik.http.routers.pihole-https.middlewares: ${AUTH_MIDDLEWARE:-authentik@docker},pihole-admin
+      traefik.http.routers.pihole-https.middlewares: pihole-canonical,${AUTH_MIDDLEWARE:-authentik@docker},pihole-admin
       traefik.http.middlewares.pihole-admin.redirectregex.regex: ^https?://([^/]+)/?$$
       traefik.http.middlewares.pihole-admin.redirectregex.replacement: https://$${1}/admin/
 
